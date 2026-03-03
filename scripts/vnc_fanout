@@ -1,0 +1,150 @@
+#! /usr/bin/env python3
+#
+# vnc_fanout -- view-only fanout (repeater) for VNC sessions
+#
+# Credit ChatGPT (with human corrections and fixes)
+#
+"""
+This is a VNC fanout script that makes a connection to an "upstream" actual
+VNC (RFB) server and fans that single connection out to multiple "downstream"
+clients.  The goal is to reduce the load on the VNC server by making only a
+single view-only TCP connection to the actual VNC server.  An additional
+benefit is that a different VNC password can be used for the fanout, thus
+adding a modicum of security.
+
+Usage
+=====
+--vnchost : the actual hostname of the running VNC server (defaults to
+  "localhost")
+
+--vncport : the port number of the running VNC server (no default);
+  e.g. 5905
+
+--vncpass-file : a text file containing a clear text view only password
+
+--host : the interface name that the fanout proxy should use for clients
+  to connect to (defaults to "localhost"); e.g. "0.0.0.0"
+
+--port : the port number that the fanout proxy should use for clients to
+  connect to (no default); e.g. 5910
+
+--pass-file : a text file containing a clear text view only password that
+  clients should use to connect to the proxy
+
+Limitations
+===========
+*** MANY ***; the program only currently supports RAW encoding and simple
+VNCAuth authentication
+"""
+# stdlib imports
+import sys
+import asyncio
+import logging
+import logging.handlers
+from argparse import ArgumentParser
+
+# Local
+from vnc_fanout.proxy import VNCProxy
+
+LOG_FORMAT = '%(asctime)s | %(levelname)1.1s | %(filename)s:%(lineno)d (%(funcName)s) | %(message)s'  # noqa
+
+
+def main(options, args):
+
+    # Create logger.
+    logger = logging.Logger('vnc_fanout')
+    fmt = logging.Formatter(LOG_FORMAT)
+
+    if options.logfile is not None:
+        fileHdlr = logging.handlers.FileHandler(options.logfile)
+        fileHdlr.setLevel(options.loglevel)
+        fileHdlr.setFormatter(fmt)
+        logger.addHandler(fileHdlr)
+
+    if options.logstderr:
+        stderrHdlr = logging.StreamHandler()
+        stderrHdlr.setLevel(options.loglevel)
+        stderrHdlr.setFormatter(fmt)
+        logger.addHandler(stderrHdlr)
+
+    # Read upstream VNC password
+    logger.info("reading upstream password...")
+    with open(options.upstream_password, 'r') as in_f:
+        upstream_password = in_f.read().strip()
+
+    # Read downstream VNC password
+    logger.info("reading proxy (downstream) password...")
+    with open(options.downstream_password, 'r') as in_f:
+        downstream_password = in_f.read().strip()
+
+    try:
+        logger.info("starting VNC fanout proxy...")
+        asyncio.run(VNCProxy(logger,
+                             options.upstream_host,
+                             options.upstream_port,
+                             upstream_password,
+                             options.downstream_host,
+                             options.downstream_port,
+                             downstream_password).start())
+
+    except KeyboardInterrupt as e:
+        print("Closed by keyboard interrupt...")
+
+    except Exception as e:
+        logger.error(f"exception in VNC fanout proxy: {e}", exc_info=True)
+
+    logger.info("terminating VNC fanout proxy...")
+
+
+if __name__ == "__main__":
+
+    argprs = ArgumentParser(description="VNC view-only repeater")
+
+    argprs.add_argument("--vnchost", dest="upstream_host", metavar="HOST",
+                        default='localhost',
+                        help="Specify HOST as upstream (actual VNC server) host")  # noqa
+    argprs.add_argument("--vncport", dest="upstream_port", metavar="PORT",
+                        default=None, type=int,
+                        help="Specify PORT as upstream (actual VNC server) port")  # noqa
+    argprs.add_argument("--vncpass-file", dest="upstream_password", metavar="PASS",    # noqa
+                        default=None,
+                        help="Specify PASS as upstream (actual VNC server) password file")    # noqa
+
+    argprs.add_argument("--host", dest="downstream_host", metavar="HOST",
+                        default='localhost',
+                        help="Specify HOST as downstream (repeater) interface")
+    argprs.add_argument("--port", dest="downstream_port", metavar="PORT",
+                        default=None, type=int,
+                        help="Specify PORT as downstream (repeater) port")
+    argprs.add_argument("--pass-file", dest="downstream_password", metavar="PASS",  # noqa
+                        default=None,
+                        help="Specify PASS as downstream (repeater) password")
+
+    # logging options
+    argprs.add_argument("--loglevel", dest="loglevel", metavar="LEVEL",
+                        default=logging.WARNING, type=int,
+                        help="Specify LEVEL for logging (default warning)")
+    argprs.add_argument("--logfile", dest="logfile", metavar="FILE",
+                        default=None,
+                        help="Specify a log FILE")
+    argprs.add_argument("--stderr", dest="logstderr", default=False,
+                        action="store_true",
+                        help="Copy logging also to stderr")
+
+    (options, args) = argprs.parse_known_args(sys.argv[1:])
+    if len(args) != 0:
+        argprs.error("incorrect number of arguments")
+
+    if options.upstream_port is None:
+        argprs.error("Please specify an upstream port with --vncport")
+
+    if options.upstream_password is None:
+        argprs.error("Please specify an upstream passwd file with --vncpass-file")  # noqa
+
+    if options.downstream_port is None:
+        argprs.error("Please specify a downstream port with --port")
+
+    if options.downstream_password is None:
+        argprs.error("Please specify a downstream passwd file with --pass-file")  # noqa
+
+    main(options, args)

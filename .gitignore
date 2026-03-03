@@ -1,0 +1,25 @@
+# ignore some commonly problematic files
+
+# python compiled files
+*.pyc
+*.pyo
+__pycache__
+
+# testing stuff
+.pytest_cache
+
+# Packages/installer info
+*.egg
+*.egg-info
+dist
+build
+
+# emacs backups
+*~
+\#*\#
+
+# ignore generated version file
+vnc_fanout/version.py
+
+# Mac OSX
+.DS_Store
