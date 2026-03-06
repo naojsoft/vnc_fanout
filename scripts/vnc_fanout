@@ -42,6 +42,7 @@ import asyncio
 import logging
 import logging.handlers
 from argparse import ArgumentParser
+import tomllib
 
 # Local
 from vnc_fanout.proxy import VNCProxy
@@ -67,24 +68,27 @@ def main(options, args):
         stderrHdlr.setFormatter(fmt)
         logger.addHandler(stderrHdlr)
 
-    # Read upstream VNC password
-    logger.info("reading upstream password...")
-    with open(options.upstream_password, 'r') as in_f:
-        upstream_password = in_f.read().strip()
+    # Read configuration file
+    logger.info("reading configuration file...")
+    with open(options.config_file, 'rb') as cfg_f:
+        cfg_d = tomllib.load(cfg_f)
 
-    # Read downstream VNC password
-    logger.info("reading proxy (downstream) password...")
-    with open(options.downstream_password, 'r') as in_f:
-        downstream_password = in_f.read().strip()
+    upstream_host = cfg_d['upstream'].get('vnc_host', "localhost")
+    upstream_port = cfg_d['upstream'].get('vnc_port', None)
+    upstream_password = cfg_d['upstream'].get('vnc_password', None)
+
+    downstream_host = cfg_d['downstream'].get('proxy_host', "localhost")
+    downstream_port = cfg_d['downstream'].get('proxy_port', None)
+    downstream_password = cfg_d['downstream'].get('proxy_password', None)
 
     try:
         logger.info("starting VNC fanout proxy...")
         asyncio.run(VNCProxy(logger,
-                             options.upstream_host,
-                             options.upstream_port,
+                             upstream_host,
+                             upstream_port,
                              upstream_password,
-                             options.downstream_host,
-                             options.downstream_port,
+                             downstream_host,
+                             downstream_port,
                              downstream_password).start())
 
     except KeyboardInterrupt as e:
@@ -100,26 +104,9 @@ if __name__ == "__main__":
 
     argprs = ArgumentParser(description="VNC view-only repeater")
 
-    argprs.add_argument("--vnchost", dest="upstream_host", metavar="HOST",
-                        default='localhost',
-                        help="Specify HOST as upstream (actual VNC server) host")  # noqa
-    argprs.add_argument("--vncport", dest="upstream_port", metavar="PORT",
-                        default=None, type=int,
-                        help="Specify PORT as upstream (actual VNC server) port")  # noqa
-    argprs.add_argument("--vncpass-file", dest="upstream_password", metavar="PASS",    # noqa
+    argprs.add_argument("-f", "--config", dest="config_file", metavar="FILE",
                         default=None,
-                        help="Specify PASS as upstream (actual VNC server) password file")    # noqa
-
-    argprs.add_argument("--host", dest="downstream_host", metavar="HOST",
-                        default='localhost',
-                        help="Specify HOST as downstream (repeater) interface")
-    argprs.add_argument("--port", dest="downstream_port", metavar="PORT",
-                        default=None, type=int,
-                        help="Specify PORT as downstream (repeater) port")
-    argprs.add_argument("--pass-file", dest="downstream_password", metavar="PASS",  # noqa
-                        default=None,
-                        help="Specify PASS as downstream (repeater) password")
-
+                        help="Specify FILE as configuration file")
     # logging options
     argprs.add_argument("--loglevel", dest="loglevel", metavar="LEVEL",
                         default=logging.WARNING, type=int,
@@ -135,16 +122,7 @@ if __name__ == "__main__":
     if len(args) != 0:
         argprs.error("incorrect number of arguments")
 
-    if options.upstream_port is None:
-        argprs.error("Please specify an upstream port with --vncport")
-
-    if options.upstream_password is None:
-        argprs.error("Please specify an upstream passwd file with --vncpass-file")  # noqa
-
-    if options.downstream_port is None:
-        argprs.error("Please specify a downstream port with --port")
-
-    if options.downstream_password is None:
-        argprs.error("Please specify a downstream passwd file with --pass-file")  # noqa
+    if options.config_file is None:
+        argprs.error("Please specify a configuration file with -f")
 
     main(options, args)
