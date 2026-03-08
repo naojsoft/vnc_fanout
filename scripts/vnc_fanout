@@ -14,22 +14,10 @@ adding a modicum of security.
 
 Usage
 =====
---vnchost : the actual hostname of the running VNC server (defaults to
-  "localhost")
+$ vnc_fanout -f examples/example_config.toml
 
---vncport : the port number of the running VNC server (no default);
-  e.g. 5905
-
---vncpass-file : a text file containing a clear text view only password
-
---host : the interface name that the fanout proxy should use for clients
-  to connect to (defaults to "localhost"); e.g. "0.0.0.0"
-
---port : the port number that the fanout proxy should use for clients to
-  connect to (no default); e.g. 5910
-
---pass-file : a text file containing a clear text view only password that
-  clients should use to connect to the proxy
+Starts a VNC fanout for each screen defined in the configuration file.
+See examples/example_config.toml for details of the config file format.
 
 Limitations
 ===========
@@ -40,49 +28,53 @@ VNCAuth authentication
 import sys
 import asyncio
 import logging
-import logging.handlers
 from argparse import ArgumentParser
 import tomllib
+import multiprocessing as mp
 
 # Local
 from vnc_fanout.proxy import VNCProxy
 
+# needed on Linux, so that we get a new event loop for each child
+mp.set_start_method('spawn', force=True)
+
 LOG_FORMAT = '%(asctime)s | %(levelname)1.1s | %(filename)s:%(lineno)d (%(funcName)s) | %(message)s'  # noqa
 
 
-def main(options, args):
+def run_proxy(scr_d):
+    # Runs a VNC fanout proxy whose configuration is defined in the dict
+    # ``scr_d``.
 
+    name = scr_d['name']
     # Create logger.
-    logger = logging.Logger('vnc_fanout')
+    logfile = scr_d.get('logfile', None)
+    loglevel = scr_d.get('loglevel', logging.WARNING)
+
+    logger = logging.Logger(f'vnc_fanout_{name}')
     fmt = logging.Formatter(LOG_FORMAT)
 
-    if options.logfile is not None:
-        fileHdlr = logging.handlers.FileHandler(options.logfile)
-        fileHdlr.setLevel(options.loglevel)
+    if logfile is not None:
+        fileHdlr = logging.FileHandler(logfile)
+        fileHdlr.setLevel(loglevel)
         fileHdlr.setFormatter(fmt)
         logger.addHandler(fileHdlr)
 
-    if options.logstderr:
+    else:
         stderrHdlr = logging.StreamHandler()
-        stderrHdlr.setLevel(options.loglevel)
+        stderrHdlr.setLevel(loglevel)
         stderrHdlr.setFormatter(fmt)
         logger.addHandler(stderrHdlr)
 
-    # Read configuration file
-    logger.info("reading configuration file...")
-    with open(options.config_file, 'rb') as cfg_f:
-        cfg_d = tomllib.load(cfg_f)
+    upstream_host = scr_d['upstream'].get('vnc_host', "localhost")
+    upstream_port = scr_d['upstream'].get('vnc_port', None)
+    upstream_password = scr_d['upstream'].get('vnc_password', None)
 
-    upstream_host = cfg_d['upstream'].get('vnc_host', "localhost")
-    upstream_port = cfg_d['upstream'].get('vnc_port', None)
-    upstream_password = cfg_d['upstream'].get('vnc_password', None)
-
-    downstream_host = cfg_d['downstream'].get('proxy_host', "localhost")
-    downstream_port = cfg_d['downstream'].get('proxy_port', None)
-    downstream_password = cfg_d['downstream'].get('proxy_password', None)
+    downstream_host = scr_d['downstream'].get('proxy_host', "localhost")
+    downstream_port = scr_d['downstream'].get('proxy_port', None)
+    downstream_password = scr_d['downstream'].get('proxy_password', None)
 
     try:
-        logger.info("starting VNC fanout proxy...")
+        logger.info(f"starting {name} VNC fanout proxy...")
         asyncio.run(VNCProxy(logger,
                              upstream_host,
                              upstream_port,
@@ -91,13 +83,38 @@ def main(options, args):
                              downstream_port,
                              downstream_password).start())
 
-    except KeyboardInterrupt as e:
-        print("Closed by keyboard interrupt...")
-
     except Exception as e:
-        logger.error(f"exception in VNC fanout proxy: {e}", exc_info=True)
+        logger.error(f"exception in {name} VNC fanout proxy: {e}",
+                     exc_info=True)
 
     logger.info("terminating VNC fanout proxy...")
+    return name
+
+
+def main(options, args):
+
+    # Read configuration file
+    print("reading configuration file...")
+    with open(options.config_file, 'rb') as cfg_f:
+        cfg_d = tomllib.load(cfg_f)
+
+    print("starting fanouts")
+    cfgs = []
+    for key in cfg_d:
+        if not key.startswith('screen'):
+            continue
+        scr_d = cfg_d[key]
+        if 'name' not in scr_d:
+            scr_d['name'] = key
+        cfgs.append(scr_d)
+
+    try:
+        num = len(cfgs)
+        with mp.Pool(num) as pool:
+            print(list(pool.map(run_proxy, cfgs)))
+
+    except KeyboardInterrupt as e:
+        print("Closed by keyboard interrupt...")
 
 
 if __name__ == "__main__":

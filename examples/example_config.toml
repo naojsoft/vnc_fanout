@@ -1,14 +1,22 @@
-[upstream]
+
+[screen1]
+# can assign a log file and a logging level
+# logfile = "vnc_fanout_screen1.log"
+# loglevel = 20
+
+[screen1.upstream]
 # this is the actual VNC server we are connecting to
 vnc_host = "localhost"
 vnc_port = 5909
 # VNC server p/w
 vnc_password = "foobar9"
 
-[downstream]
+[screen1.downstream]
 # which interface and port to bind our proxy server on
 proxy_host = "localhost"
 proxy_port = 5910
 # we can have a different password for the proxy vnc server
 proxy_password = "hellokitty"
 
+
+# define as many screens here as you want--all have the above format
