@@ -8,6 +8,9 @@ import struct
 # 3rd party
 from Crypto.Cipher import DES
 
+# local
+from vnc_fanout import tight
+
 RFB_VERSION = b"RFB 003.008\n"
 
 
@@ -36,12 +39,18 @@ def vnc_encrypt(challenge, password):
 # ------------------------------------------------------------
 
 class ClientState:
-    def __init__(self, reader, writer):
+    def __init__(self, reader, writer, pixel_format):
         self.reader = reader
         self.writer = writer
         self.wants_update = False
         self.needs_full = True
         self.supported_encodings = []
+        self.zlib_streams = [None, None, None, None]
+        self.pixel_format = pixel_format
+
+    @property
+    def wants_tight(self):
+        return 7 in self.supported_encodings
 
 
 # ------------------------------------------------------------
@@ -186,41 +195,107 @@ class VNCProxy:
     # DOWNSTREAM DISPATCH
     # --------------------------------------------------------
 
+    def _tile_rect(self, x, y, w, h, data):
+        """Split a rectangle into tiles no wider than TIGHT_MAX_WIDTH
+        and no taller than TIGHT_MAX_HEIGHT.  Returns a list of
+        (x, y, w, h, data) tuples with pixel data extracted from the
+        source rectangle.
+        """
+        max_w = tight.TIGHT_MAX_WIDTH
+        max_h = tight.TIGHT_MAX_HEIGHT
+
+        if w <= max_w and h <= max_h:
+            return [(x, y, w, h, data)]
+
+        tiles = []
+        src_stride = w * self.bpp
+        ty = 0
+        while ty < h:
+            th = min(max_h, h - ty)
+            tx = 0
+            while tx < w:
+                tw = min(max_w, w - tx)
+                tile_data = bytearray(tw * th * self.bpp)
+                dst_stride = tw * self.bpp
+                for row in range(th):
+                    src = (ty + row) * src_stride + tx * self.bpp
+                    dst = row * dst_stride
+                    tile_data[dst:dst + dst_stride] = \
+                        data[src:src + dst_stride]
+                tiles.append((x + tx, y + ty, tw, th,
+                              bytes(tile_data)))
+                tx += tw
+            ty += th
+        return tiles
+
     async def dispatch_rectangles(self, rects):
         dead = []
+
+        # Pre-build the RAW message once for all RAW clients
+        raw_msg = None
+        # Pre-tile once for all Tight clients
+        tight_rects = None
 
         for client in self.clients:
             if not client.wants_update:
                 continue
 
-            msg = bytearray()
-            msg += b"\x00\x00"
-            msg += struct.pack(">H", len(rects))
-
-            for x, y, w, h, data in rects:
-                msg += struct.pack(">HHHHi", x, y, w, h, 0)
-                msg += data
-
             try:
+                if client.wants_tight:
+                    if tight_rects is None:
+                        tight_rects = []
+                        for x, y, w, h, data in rects:
+                            tight_rects.extend(
+                                self._tile_rect(x, y, w, h, data))
+
+                    msg = bytearray(b"\x00\x00")
+                    msg += struct.pack(">H", len(tight_rects))
+                    for x, y, w, h, data in tight_rects:
+                        msg += struct.pack(">HHHHi", x, y, w, h, 7)
+                        msg += tight.encode_rect(data, w, h,
+                                                 self.pixel_format,
+                                                 self.bpp, client)
+                else:
+                    if raw_msg is None:
+                        raw_msg = bytearray(b"\x00\x00")
+                        raw_msg += struct.pack(">H", len(rects))
+                        for x, y, w, h, data in rects:
+                            raw_msg += struct.pack(">HHHHi",
+                                                   x, y, w, h, 0)
+                            raw_msg += data
+                    msg = raw_msg
+
                 client.writer.write(msg)
                 await client.writer.drain()
             except Exception as e:
                 dead.append(client)
-                self.logger(f"exception writing to client: {e}; closing...")
+                self.logger.error(
+                    f"exception writing to client: {e}; closing...")
 
         for c in dead:
-            self.clients.remove(c)
+            self.clients.discard(c)
 
     async def send_full_frame(self, client):
-        msg = bytearray()
-        msg += b"\x00\x00"
-        msg += struct.pack(">H", 1)
-        msg += struct.pack(">HHHHi",
-                           0, 0,
-                           self.fb_width,
-                           self.fb_height,
-                           0)
-        msg += self.framebuffer
+        if client.wants_tight:
+            strips = self._tile_rect(0, 0,
+                                      self.fb_width, self.fb_height,
+                                      self.framebuffer)
+            msg = bytearray(b"\x00\x00")
+            msg += struct.pack(">H", len(strips))
+            for x, y, w, h, data in strips:
+                msg += struct.pack(">HHHHi", x, y, w, h, 7)
+                msg += tight.encode_rect(data, w, h,
+                                         self.pixel_format,
+                                         self.bpp, client)
+        else:
+            msg = bytearray(b"\x00\x00")
+            msg += struct.pack(">H", 1)
+            msg += struct.pack(">HHHHi",
+                               0, 0,
+                               self.fb_width,
+                               self.fb_height,
+                               0)
+            msg += self.framebuffer
 
         client.writer.write(msg)
         await client.writer.drain()
@@ -230,7 +305,7 @@ class VNCProxy:
     # --------------------------------------------------------
 
     async def handle_client(self, reader, writer):
-        state = ClientState(reader, writer)
+        state = ClientState(reader, writer, self.pixel_format)
         self.clients.add(state)
 
         try:
@@ -269,14 +344,16 @@ class VNCProxy:
                 # self.logger.debug("Downstream msg type:", msg_type)
                 if msg_type == 0:  # SetPixelFormat
                     await reader.readexactly(3)
-                    await reader.readexactly(16)
-                    # For now, ignore it, but DO NOT crash.
-                    # Ideally, store and convert formats.
+                    state.pixel_format = await reader.readexactly(16)
 
                 elif msg_type == 2:  # SetEncodings
                     await reader.readexactly(1)
                     n = struct.unpack(">H", await reader.readexactly(2))[0]
-                    await reader.readexactly(4 * n)
+                    enc_data = await reader.readexactly(4 * n)
+                    state.supported_encodings = [
+                        struct.unpack(">i", enc_data[i*4:(i+1)*4])[0]
+                        for i in range(n)
+                    ]
 
                 elif msg_type == 3:  # FramebufferUpdateRequest
                     rest = await reader.readexactly(9)
