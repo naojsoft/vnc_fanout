@@ -27,7 +27,7 @@ VNCAuth authentication
 # stdlib imports
 import sys
 import asyncio
-import logging
+import logging, logging.handlers
 from argparse import ArgumentParser
 import tomllib
 import multiprocessing as mp
@@ -40,6 +40,10 @@ mp.set_start_method('spawn', force=True)
 
 LOG_FORMAT = '%(asctime)s | %(levelname)1.1s | %(filename)s:%(lineno)d (%(funcName)s) | %(message)s'  # noqa
 
+# max size of log file before rotating
+LOG_MAXSIZE = 20 * 1024 * 1024
+LOG_BACKUPS = 4
+
 
 def run_proxy(scr_d):
     # Runs a VNC fanout proxy whose configuration is defined in the dict
@@ -49,12 +53,16 @@ def run_proxy(scr_d):
     # Create logger.
     logfile = scr_d.get('logfile', None)
     loglevel = scr_d.get('loglevel', logging.WARNING)
+    log_maxsize = scr_d.get('log_maxsize', LOG_MAXSIZE)
+    log_backups = scr_d.get('log_backups', LOG_BACKUPS)
 
     logger = logging.Logger(f'vnc_fanout_{name}')
     fmt = logging.Formatter(LOG_FORMAT)
 
     if logfile is not None:
-        fileHdlr = logging.FileHandler(logfile)
+        fileHdlr = logging.handlers.RotatingFileHandler(logfile,
+                                                        maxBytes=log_maxsize,
+                                                        backupCount=log_backups)
         fileHdlr.setLevel(loglevel)
         fileHdlr.setFormatter(fmt)
         logger.addHandler(fileHdlr)
@@ -124,16 +132,6 @@ if __name__ == "__main__":
     argprs.add_argument("-f", "--config", dest="config_file", metavar="FILE",
                         default=None,
                         help="Specify FILE as configuration file")
-    # logging options
-    argprs.add_argument("--loglevel", dest="loglevel", metavar="LEVEL",
-                        default=logging.WARNING, type=int,
-                        help="Specify LEVEL for logging (default warning)")
-    argprs.add_argument("--logfile", dest="logfile", metavar="FILE",
-                        default=None,
-                        help="Specify a log FILE")
-    argprs.add_argument("--stderr", dest="logstderr", default=False,
-                        action="store_true",
-                        help="Copy logging also to stderr")
 
     (options, args) = argprs.parse_known_args(sys.argv[1:])
     if len(args) != 0:

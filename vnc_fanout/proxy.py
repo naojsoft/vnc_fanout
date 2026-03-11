@@ -143,14 +143,17 @@ class VNCProxy:
 
         await asyncio.sleep(0.2)
 
-        # incremental loop
-        while True:
-            msg = struct.pack(">BBHHHH",
+        # Performance: pre-build the incremental request message once
+        # instead of calling struct.pack every 50 ms.
+        inc_msg = struct.pack(">BBHHHH",
                               3, 1, 0, 0,
                               self.fb_width,
                               self.fb_height
                               )
-            self.up_writer.write(msg)
+
+        # incremental loop
+        while True:
+            self.up_writer.write(inc_msg)
             await self.up_writer.drain()
             await asyncio.sleep(0.05)
 
@@ -186,10 +189,17 @@ class VNCProxy:
         stride = self.fb_width * self.bpp
         rowbytes = w * self.bpp
 
-        for row in range(h):
-            src = row * rowbytes
-            dst = ((y + row) * stride) + (x * self.bpp)
-            self.framebuffer[dst:dst+rowbytes] = data[src:src+rowbytes]
+        # Performance: full-width rects (common for initial frames and
+        # large updates) use a single slice assignment instead of
+        # row-by-row copying.
+        if w == self.fb_width:
+            dst = y * stride
+            self.framebuffer[dst:dst + h * stride] = data[:h * stride]
+        else:
+            for row in range(h):
+                src = row * rowbytes
+                dst = ((y + row) * stride) + (x * self.bpp)
+                self.framebuffer[dst:dst+rowbytes] = data[src:src+rowbytes]
 
     # --------------------------------------------------------
     # DOWNSTREAM DISPATCH
@@ -200,6 +210,12 @@ class VNCProxy:
         and no taller than TIGHT_MAX_HEIGHT.  Returns a list of
         (x, y, w, h, data) tuples with pixel data extracted from the
         source rectangle.
+
+        Performance: uses memoryview to avoid copying pixel data.
+        Full-width tiles (the common case when width <= TIGHT_MAX_WIDTH)
+        get a zero-copy contiguous slice.  Non-full-width tiles still
+        require row-by-row extraction but use memoryview slices on the
+        source to avoid intermediate copies.
         """
         max_w = tight.TIGHT_MAX_WIDTH
         max_h = tight.TIGHT_MAX_HEIGHT
@@ -208,6 +224,8 @@ class VNCProxy:
             return [(x, y, w, h, data)]
 
         tiles = []
+        mv = memoryview(data) if not isinstance(data, memoryview) \
+            else data
         src_stride = w * self.bpp
         ty = 0
         while ty < h:
@@ -215,20 +233,41 @@ class VNCProxy:
             tx = 0
             while tx < w:
                 tw = min(max_w, w - tx)
-                tile_data = bytearray(tw * th * self.bpp)
-                dst_stride = tw * self.bpp
-                for row in range(th):
-                    src = (ty + row) * src_stride + tx * self.bpp
-                    dst = row * dst_stride
-                    tile_data[dst:dst + dst_stride] = \
-                        data[src:src + dst_stride]
-                tiles.append((x + tx, y + ty, tw, th,
-                              bytes(tile_data)))
+                # Full-width tile: single contiguous slice, no row copy
+                if tw == w:
+                    start = ty * src_stride
+                    end = (ty + th) * src_stride
+                    tiles.append((x + tx, y + ty, tw, th,
+                                  mv[start:end]))
+                else:
+                    tile_data = bytearray(tw * th * self.bpp)
+                    dst_stride = tw * self.bpp
+                    for row in range(th):
+                        src = (ty + row) * src_stride + tx * self.bpp
+                        dst = row * dst_stride
+                        tile_data[dst:dst + dst_stride] = \
+                            mv[src:src + dst_stride]
+                    tiles.append((x + tx, y + ty, tw, th,
+                                  bytes(tile_data)))
                 tx += tw
             ty += th
         return tiles
 
     async def dispatch_rectangles(self, rects):
+        """Fan out a FramebufferUpdate to all active clients.
+
+        Performance: expensive work is done at most once regardless of
+        client count.  The RAW message is built once and shared across
+        all RAW clients.  Tight tiling (_tile_rect) is computed once
+        and reused for all Tight clients (per-client zlib encoding is
+        still required since each client has its own zlib stream state).
+
+        Note: encoding is intentionally synchronous (not offloaded to a
+        thread executor) to naturally throttle upstream update requests.
+        If encoding were async, the upstream_update_loop would keep
+        sending requests while responses pile up unread, causing the
+        upstream server to drop the connection.
+        """
         dead = []
 
         # Pre-build the RAW message once for all RAW clients
@@ -278,8 +317,8 @@ class VNCProxy:
     async def send_full_frame(self, client):
         if client.wants_tight:
             strips = self._tile_rect(0, 0,
-                                      self.fb_width, self.fb_height,
-                                      self.framebuffer)
+                                     self.fb_width, self.fb_height,
+                                     self.framebuffer)
             msg = bytearray(b"\x00\x00")
             msg += struct.pack(">H", len(strips))
             for x, y, w, h, data in strips:
@@ -381,6 +420,9 @@ class VNCProxy:
                 else:
                     self.logger.warning(f"Unknown downstream message: {msg_type}")  # noqa
                     break
+
+        except (asyncio.IncompleteReadError, ConnectionResetError):
+            self.logger.info("client disconnected")
 
         except Exception as e:
             self.logger.error(f"exception handling client: {e}", exc_info=True)
