@@ -415,6 +415,10 @@ class VNCProxy:
     # --------------------------------------------------------
 
     async def handle_client(self, reader, writer):
+        peername = writer.get_extra_info("peername")
+        addr = f"{peername[0]}:{peername[1]}" if peername else "unknown"
+        self.logger.info(f"client connected: {addr}")
+
         state = ClientState(reader, writer, self.pixel_format)
         self.clients.add(state)
 
@@ -493,7 +497,7 @@ class VNCProxy:
                     break
 
         except (asyncio.IncompleteReadError, ConnectionResetError):
-            self.logger.info("client disconnected")
+            self.logger.info(f"client disconnected: {addr}")
 
         except Exception as e:
             self.logger.error(f"exception handling client: {e}", exc_info=True)
