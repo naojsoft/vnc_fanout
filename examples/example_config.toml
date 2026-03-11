@@ -1,10 +1,17 @@
 
 [screen1]
 # can assign a log file and a logging level
-logfile = "vnc_fanout_screen1.log"
-loglevel = 20
-# seconds between upstream reconnect attempts (default 5)
-# reconnect_delay = 5
+#logfile = "vnc_fanout_screen1.log"
+#loglevel = 20
+
+# max size of log file before rotating (example 20MB)
+# log_maxsize = 20971520
+# number of log backups before rolling over
+# log_backups = 4
+
+# seconds between upstream reconnect attempts (default 10)
+upstream_reconnect_delay = 10
+
 
 [screen1.upstream]
 # this is the actual VNC server we are connecting to

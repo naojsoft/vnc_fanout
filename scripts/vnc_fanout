@@ -16,6 +16,10 @@ Usage
 =====
 $ vnc_fanout -f examples/example_config.toml
 
+$ vnc_fanout --help
+
+to see options.
+
 Starts a VNC fanout for each screen defined in the configuration file.
 See examples/example_config.toml for details of the config file format.
 
@@ -25,7 +29,7 @@ Limitations
 VNCAuth authentication
 """
 # stdlib imports
-import sys
+import sys, os
 import asyncio
 import logging, logging.handlers
 from argparse import ArgumentParser
@@ -81,7 +85,7 @@ def run_proxy(scr_d):
     downstream_port = scr_d['downstream'].get('proxy_port', None)
     downstream_password = scr_d['downstream'].get('proxy_password', None)
 
-    reconnect_delay = scr_d.get('reconnect_delay', 5)
+    reconnect_delay = scr_d.get('upstream_reconnect_delay', 10)
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -119,6 +123,11 @@ def main(options, args):
             scr_d['name'] = key
         cfgs.append(scr_d)
 
+    if options.pidfile is not None:
+        # user specified a path to a pid file
+        with open(options.pidfile, 'w') as pid_f:
+            pid_f.write("{}\n".format(os.getpid()))
+
     try:
         num = len(cfgs)
         with mp.Pool(num) as pool:
@@ -135,6 +144,8 @@ if __name__ == "__main__":
     argprs.add_argument("-f", "--config", dest="config_file", metavar="FILE",
                         default=None,
                         help="Specify FILE as configuration file")
+    argprs.add_argument("--pidfile", dest="pidfile", metavar="FILE",
+                        default=None, help="Write pid of process to FILE")
 
     (options, args) = argprs.parse_known_args(sys.argv[1:])
     if len(args) != 0:

@@ -10,6 +10,15 @@ License
 =======
 BSD Zero Clause License
 
+Features and Limitations
+========================
+- Fans out *one* (upstream) VNC server view only connection to many
+  (downstream) clients
+- Supports RAW and Tight encoding
+- Supports 24 and 32 bpp
+- Can have a different password for upstream and downstream connections
+- Supports only simple VNCAuth authentication
+
 Install
 =======
 $ pip install .
@@ -18,11 +27,5 @@ Usage
 =====
 $ vnc_fanout -f examples/example_config.toml
 
-See the example config file for the format and options
+See the example config file for the format and options.
 
-Limitations
-===========
-*** MANY ***
-
-- the program only currently supports RAW and Tight encoding
-- simple VNCAuth authentication
