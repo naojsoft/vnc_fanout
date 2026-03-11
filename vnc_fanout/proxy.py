@@ -61,7 +61,8 @@ class VNCProxy:
 
     def __init__(self, logger,
                  upstream_host, upstream_port, upstream_password,
-                 downstream_host, downstream_port, downstream_password):
+                 downstream_host, downstream_port, downstream_password,
+                 reconnect_delay=5):
         self.logger = logger
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
@@ -69,21 +70,32 @@ class VNCProxy:
         self.downstream_host = downstream_host
         self.downstream_port = downstream_port
         self.downstream_password = downstream_password
+        self.reconnect_delay = reconnect_delay
 
         self.clients = set([])
+
+        self.up_reader = None
+        self.up_writer = None
 
         self.framebuffer = None
         self.fb_width = None
         self.fb_height = None
         self.bpp = 4  # assuming 32-bit truecolor RAW
 
-        self.initial_frame_event = asyncio.Event()
-
     # --------------------------------------------------------
     # UPSTREAM
     # --------------------------------------------------------
 
     async def connect_upstream(self):
+        """Perform the VNC handshake with the upstream server.
+
+        Sets up self.up_reader, self.up_writer, self.framebuffer,
+        self.server_init, etc.  Does NOT start the read/update tasks;
+        the caller (_run_upstream) manages those.
+        """
+        self.logger.info(
+            f"connecting to upstream {self.upstream_host}:{self.upstream_port}")
+
         self.up_reader, self.up_writer = \
             await asyncio.open_connection(self.upstream_host,
                                           self.upstream_port)
@@ -128,8 +140,67 @@ class VNCProxy:
         self.up_writer.write(msg)
         await self.up_writer.drain()
 
-        asyncio.create_task(self.upstream_update_loop())
-        asyncio.create_task(self.read_upstream())
+        self.logger.info("upstream connected")
+
+    def _close_upstream(self):
+        """Close the upstream connection if open."""
+        if self.up_writer is not None:
+            try:
+                self.up_writer.close()
+            except Exception:
+                pass
+            self.up_writer = None
+            self.up_reader = None
+
+    async def _run_upstream(self):
+        """Run upstream read/update tasks; reconnect on failure.
+
+        On disconnect, cancels both tasks, closes the upstream socket,
+        marks all clients for a full refresh, and retries the connection
+        every ``reconnect_delay`` seconds.
+        """
+        while True:
+            update_task = asyncio.create_task(self.upstream_update_loop())
+            read_task = asyncio.create_task(self.read_upstream())
+
+            try:
+                done, pending = await asyncio.wait(
+                    [update_task, read_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                # Re-raise the exception from the completed task
+                for task in done:
+                    task.result()
+            except Exception as e:
+                self.logger.warning(f"upstream disconnected: {e}")
+
+            self._close_upstream()
+
+            # Mark all clients for a full refresh on reconnect.
+            # Do NOT clear wants_update -- clients have already sent their
+            # FramebufferUpdateRequest and are waiting for a response.
+            # Clearing it would deadlock (proxy waits for request, client
+            # waits for response).
+            for client in self.clients:
+                client.needs_full = True
+
+            # Retry loop
+            while True:
+                self.logger.info(
+                    f"reconnecting in {self.reconnect_delay}s...")
+                await asyncio.sleep(self.reconnect_delay)
+                try:
+                    await self.connect_upstream()
+                    break
+                except Exception as e:
+                    self.logger.warning(
+                        f"upstream reconnect failed: {e}")
 
     async def upstream_update_loop(self):
         # initial full frame
@@ -433,13 +504,25 @@ class VNCProxy:
 
     # --------------------------------------------------------
     async def start(self):
-        await self.connect_upstream()
+        # Must connect upstream first to get server_init for clients
+        while True:
+            try:
+                await self.connect_upstream()
+                break
+            except Exception as e:
+                self.logger.warning(f"upstream connection failed: {e}")
+                self.logger.info(
+                    f"retrying in {self.reconnect_delay}s...")
+                await asyncio.sleep(self.reconnect_delay)
 
         server = await asyncio.start_server(
             self.handle_client,
             self.downstream_host,
             self.downstream_port
         )
+
+        # Run upstream read/update tasks with reconnect in background
+        asyncio.create_task(self._run_upstream())
 
         async with server:
             await server.serve_forever()

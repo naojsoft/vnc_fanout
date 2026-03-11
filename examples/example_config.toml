@@ -3,6 +3,8 @@
 # can assign a log file and a logging level
 logfile = "vnc_fanout_screen1.log"
 loglevel = 20
+# seconds between upstream reconnect attempts (default 5)
+# reconnect_delay = 5
 
 [screen1.upstream]
 # this is the actual VNC server we are connecting to

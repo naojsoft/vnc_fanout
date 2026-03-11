@@ -81,6 +81,8 @@ def run_proxy(scr_d):
     downstream_port = scr_d['downstream'].get('proxy_port', None)
     downstream_password = scr_d['downstream'].get('proxy_password', None)
 
+    reconnect_delay = scr_d.get('reconnect_delay', 5)
+
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
         asyncio.run(VNCProxy(logger,
@@ -89,7 +91,8 @@ def run_proxy(scr_d):
                              upstream_password,
                              downstream_host,
                              downstream_port,
-                             downstream_password).start())
+                             downstream_password,
+                             reconnect_delay=reconnect_delay).start())
 
     except Exception as e:
         logger.error(f"exception in {name} VNC fanout proxy: {e}",
