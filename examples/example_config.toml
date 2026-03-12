@@ -28,6 +28,10 @@ proxy_host = "localhost"
 proxy_port = 5910
 # we can have a different password for the proxy vnc server
 proxy_password = "hellokitty"
+# optional: clients authenticating with this password can claim
+# control of the upstream session using Ctrl+F1.  If not set, all
+# clients are view-only.
+#proxy_control_password = "secretcontrol"
 
 
 # define as many screens here as you want--all have the above format

@@ -83,6 +83,8 @@ def run_proxy(scr_d):
     downstream_host = scr_d['downstream'].get('proxy_host', "localhost")
     downstream_port = scr_d['downstream'].get('proxy_port', None)
     downstream_password = scr_d['downstream'].get('proxy_password', None)
+    downstream_control_password = scr_d['downstream'].get(
+        'proxy_control_password', None)
 
     reconnect_delay = scr_d.get('upstream_reconnect_delay', 10)
 
@@ -95,6 +97,7 @@ def run_proxy(scr_d):
                              downstream_host,
                              downstream_port,
                              downstream_password,
+                             downstream_control_password=downstream_control_password,
                              reconnect_delay=reconnect_delay).start())
 
     except Exception as e:

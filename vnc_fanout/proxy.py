@@ -13,6 +13,10 @@ from vnc_fanout import tight
 
 RFB_VERSION = b"RFB 003.008\n"
 
+# Keysyms for control grab sequence (Ctrl+F1)
+XK_Control_L = 0xffe3
+XK_Control_R = 0xffe4
+XK_F1 = 0xffbe
 
 __all__ = ["VNCProxy"]
 
@@ -39,7 +43,7 @@ def vnc_encrypt(challenge, password):
 # ------------------------------------------------------------
 
 class ClientState:
-    def __init__(self, reader, writer, pixel_format):
+    def __init__(self, reader, writer, pixel_format, can_control=False):
         self.reader = reader
         self.writer = writer
         self.wants_update = False
@@ -47,6 +51,8 @@ class ClientState:
         self.supported_encodings = []
         self.zlib_streams = [None, None, None, None]
         self.pixel_format = pixel_format
+        self.can_control = can_control
+        self.ctrl_pressed = False  # for Ctrl+F1 grab detection
 
     @property
     def wants_tight(self):
@@ -62,6 +68,7 @@ class VNCProxy:
     def __init__(self, logger,
                  upstream_host, upstream_port, upstream_password,
                  downstream_host, downstream_port, downstream_password,
+                 downstream_control_password=None,
                  reconnect_delay=5):
         self.logger = logger
         self.upstream_host = upstream_host
@@ -70,9 +77,11 @@ class VNCProxy:
         self.downstream_host = downstream_host
         self.downstream_port = downstream_port
         self.downstream_password = downstream_password
+        self.downstream_control_password = downstream_control_password
         self.reconnect_delay = reconnect_delay
 
         self.clients = set([])
+        self.controller = None  # ClientState that holds the control token
 
         self.up_reader = None
         self.up_writer = None
@@ -435,6 +444,7 @@ class VNCProxy:
         addr = f"{peername[0]}:{peername[1]}" if peername else "unknown"
         self.logger.info(f"client connected: {addr}")
 
+        can_control = False
         state = ClientState(reader, writer, self.pixel_format)
         self.clients.add(state)
 
@@ -454,10 +464,22 @@ class VNCProxy:
             await writer.drain()
 
             resp = await reader.readexactly(16)
-            if resp != vnc_encrypt(challenge, self.downstream_password):
+
+            # Check control password first (if configured)
+            if self.downstream_control_password is not None and \
+                    resp == vnc_encrypt(challenge,
+                                        self.downstream_control_password):
+                can_control = True
+            elif resp != vnc_encrypt(challenge, self.downstream_password):
                 writer.write(struct.pack(">I", 1))
                 await writer.drain()
                 return
+
+            state.can_control = can_control
+            if can_control:
+                self.logger.info(f"client {addr} authenticated with control")
+            else:
+                self.logger.info(f"client {addr} authenticated view-only")
 
             writer.write(struct.pack(">I", 0))
             await writer.drain()
@@ -497,10 +519,43 @@ class VNCProxy:
                         state.wants_update = True
 
                 elif msg_type == 4:  # KeyEvent
-                    await reader.readexactly(7)
+                    payload = await reader.readexactly(7)
+                    down = payload[0]
+                    keysym = struct.unpack(">I", payload[3:7])[0]
+
+                    self.logger.debug(
+                        f"KeyEvent from {addr}: keysym=0x{keysym:04x} "
+                        f"down={down} ctrl={state.ctrl_pressed} "
+                        f"can_control={state.can_control}")
+
+                    # Track Ctrl state for grab sequence
+                    if keysym in (XK_Control_L, XK_Control_R):
+                        state.ctrl_pressed = bool(down)
+
+                    # Ctrl+F1: claim control token
+                    if keysym == XK_F1 and down and \
+                            state.ctrl_pressed and state.can_control:
+                        if self.controller is not state:
+                            self.controller = state
+                            self.logger.info(
+                                f"client {addr} grabbed control")
+                        # Consume the F1 key -- don't forward
+                        continue
+
+                    # Forward to upstream if this client has control
+                    if state is self.controller and \
+                            self.up_writer is not None:
+                        self.up_writer.write(b"\x04" + payload)
+                        await self.up_writer.drain()
 
                 elif msg_type == 5:  # PointerEvent
-                    await reader.readexactly(5)
+                    payload = await reader.readexactly(5)
+
+                    # Forward to upstream if this client has control
+                    if state is self.controller and \
+                            self.up_writer is not None:
+                        self.up_writer.write(b"\x05" + payload)
+                        await self.up_writer.drain()
 
                 elif msg_type == 6:  # ClientCutText
                     await reader.readexactly(3)
@@ -519,6 +574,10 @@ class VNCProxy:
             self.logger.error(f"exception handling client: {e}", exc_info=True)
 
         finally:
+            if self.controller is state:
+                self.controller = None
+                self.logger.info(
+                    f"client {addr} released control (disconnected)")
             self.clients.discard(state)
             writer.close()
 
