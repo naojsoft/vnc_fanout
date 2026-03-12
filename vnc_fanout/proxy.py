@@ -13,10 +13,24 @@ from vnc_fanout import tight
 
 RFB_VERSION = b"RFB 003.008\n"
 
-# Keysyms for control grab sequence (Ctrl+F1)
+# Keysyms for control grab sequence (Ctrl + grab key)
 XK_Control_L = 0xffe3
 XK_Control_R = 0xffe4
-XK_F1 = 0xffbe
+
+# Named keysyms for the configurable grab key
+GRAB_KEYSYMS = {
+    "f1": 0xffbe, "f2": 0xffbf, "f3": 0xffc0, "f4": 0xffc1,
+    "f5": 0xffc2, "f6": 0xffc3, "f7": 0xffc4, "f8": 0xffc5,
+    "f9": 0xffc6, "f10": 0xffc7, "f11": 0xffc8, "f12": 0xffc9,
+    "escape": 0xff1b, "tab": 0xff09, "space": 0x0020,
+    "pause": 0xff13, "scroll_lock": 0xff14, "insert": 0xff63,
+    "delete": 0xffff, "home": 0xff50, "end": 0xff57,
+}
+
+DEFAULT_GRAB_KEY = "f1"
+
+# Ctrl + this key releases the control token
+RELEASE_KEYSYM = 0xff1b  # Escape
 
 __all__ = ["VNCProxy"]
 
@@ -69,7 +83,8 @@ class VNCProxy:
                  upstream_host, upstream_port, upstream_password,
                  downstream_host, downstream_port, downstream_password,
                  downstream_control_password=None,
-                 reconnect_delay=5):
+                 reconnect_delay=5,
+                 grab_key=DEFAULT_GRAB_KEY):
         self.logger = logger
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
@@ -79,6 +94,14 @@ class VNCProxy:
         self.downstream_password = downstream_password
         self.downstream_control_password = downstream_control_password
         self.reconnect_delay = reconnect_delay
+
+        key = grab_key.lower()
+        if key not in GRAB_KEYSYMS:
+            raise ValueError(
+                f"unknown grab key {grab_key!r}; "
+                f"valid keys: {', '.join(sorted(GRAB_KEYSYMS))}")
+        self.grab_keysym = GRAB_KEYSYMS[key]
+        self.grab_key_name = grab_key
 
         self.clients = set([])
         self.controller = None  # ClientState that holds the control token
@@ -477,7 +500,9 @@ class VNCProxy:
 
             state.can_control = can_control
             if can_control:
-                self.logger.info(f"client {addr} authenticated with control")
+                self.logger.info(
+                    f"client {addr} authenticated with control "
+                    f"(Ctrl+{self.grab_key_name} to grab)")
             else:
                 self.logger.info(f"client {addr} authenticated view-only")
 
@@ -532,14 +557,23 @@ class VNCProxy:
                     if keysym in (XK_Control_L, XK_Control_R):
                         state.ctrl_pressed = bool(down)
 
-                    # Ctrl+F1: claim control token
-                    if keysym == XK_F1 and down and \
+                    # Ctrl + grab key: claim control token
+                    if keysym == self.grab_keysym and down and \
                             state.ctrl_pressed and state.can_control:
                         if self.controller is not state:
                             self.controller = state
                             self.logger.info(
                                 f"client {addr} grabbed control")
-                        # Consume the F1 key -- don't forward
+                        # Consume the grab key -- don't forward
+                        continue
+
+                    # Ctrl + release key: release control token
+                    if keysym == RELEASE_KEYSYM and down and \
+                            state.ctrl_pressed and \
+                            self.controller is state:
+                        self.controller = None
+                        self.logger.info(
+                            f"client {addr} released control")
                         continue
 
                     # Forward to upstream if this client has control

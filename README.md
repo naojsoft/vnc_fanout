@@ -12,14 +12,17 @@ BSD Zero Clause License
 
 Features and Limitations
 ========================
-- Fans out *one* (upstream) VNC server view only connection to many
-  (downstream) clients
+- Fans out *one* (upstream) VNC server connection to many (downstream) clients
 - Supports RAW and Tight encoding
 - Supports 24 and 32 bpp
 - Can have a different password for upstream and downstream connections
+- Supports view only and control passwords
+- With control connections, control is given to one of the control clients
+  at a time; to gain control, press the special key sequence (default is
+  Ctrl-F1, can be configured).
 - Can be configured to reconnect to upstream VNC while maintaining downsteam
   connections if the upstream VNC server is shut down (only recovers if
-  restarted with the same geometry and depth though)
+  restarted with the same geometry/depth/encoding though)
 - Supports only simple VNCAuth authentication
 
 Install

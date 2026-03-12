@@ -32,6 +32,10 @@ proxy_password = "hellokitty"
 # control of the upstream session using Ctrl+F1.  If not set, all
 # clients are view-only.
 #proxy_control_password = "secretcontrol"
+# key to press with Ctrl to grab control (default "f1")
+# valid keys: delete, end, escape, f1-f12, home, insert,
+#             pause, scroll_lock, space, tab
+#grab_key = "f1"
 
 
 # define as many screens here as you want--all have the above format

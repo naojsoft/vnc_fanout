@@ -87,6 +87,7 @@ def run_proxy(scr_d):
         'proxy_control_password', None)
 
     reconnect_delay = scr_d.get('upstream_reconnect_delay', 10)
+    grab_key = scr_d['downstream'].get('grab_key', 'f1')
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -98,7 +99,8 @@ def run_proxy(scr_d):
                              downstream_port,
                              downstream_password,
                              downstream_control_password=downstream_control_password,
-                             reconnect_delay=reconnect_delay).start())
+                             reconnect_delay=reconnect_delay,
+                             grab_key=grab_key).start())
 
     except Exception as e:
         logger.error(f"exception in {name} VNC fanout proxy: {e}",
