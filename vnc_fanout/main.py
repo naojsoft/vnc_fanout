@@ -1,8 +1,5 @@
-#! /usr/bin/env python3
 #
-# vnc_fanout -- view-only fanout (repeater) for VNC sessions
-#
-# Credit ChatGPT (with human corrections and fixes)
+# main.py -- entry point for vnc_fanout
 #
 """
 This is a VNC fanout script that makes a connection to an "upstream" actual
@@ -29,9 +26,11 @@ Limitations
 VNCAuth authentication
 """
 # stdlib imports
-import sys, os
+import sys
+import os
 import asyncio
-import logging, logging.handlers
+import logging
+import logging.handlers
 from argparse import ArgumentParser
 import tomllib
 import multiprocessing as mp
@@ -106,7 +105,22 @@ def run_proxy(scr_d):
     return name
 
 
-def main(options, args):
+def main():
+
+    argprs = ArgumentParser(description="VNC view-only repeater")
+
+    argprs.add_argument("-f", "--config", dest="config_file", metavar="FILE",
+                        default=None,
+                        help="Specify FILE as configuration file")
+    argprs.add_argument("--pidfile", dest="pidfile", metavar="FILE",
+                        default=None, help="Write pid of process to FILE")
+
+    (options, args) = argprs.parse_known_args(sys.argv[1:])
+    if len(args) != 0:
+        argprs.error("incorrect number of arguments")
+
+    if options.config_file is None:
+        argprs.error("Please specify a configuration file with -f")
 
     # Read configuration file
     print("reading configuration file...")
@@ -133,25 +147,9 @@ def main(options, args):
         with mp.Pool(num) as pool:
             print(list(pool.map(run_proxy, cfgs)))
 
-    except KeyboardInterrupt as e:
+    except KeyboardInterrupt:
         print("Closed by keyboard interrupt...")
 
 
 if __name__ == "__main__":
-
-    argprs = ArgumentParser(description="VNC view-only repeater")
-
-    argprs.add_argument("-f", "--config", dest="config_file", metavar="FILE",
-                        default=None,
-                        help="Specify FILE as configuration file")
-    argprs.add_argument("--pidfile", dest="pidfile", metavar="FILE",
-                        default=None, help="Write pid of process to FILE")
-
-    (options, args) = argprs.parse_known_args(sys.argv[1:])
-    if len(args) != 0:
-        argprs.error("incorrect number of arguments")
-
-    if options.config_file is None:
-        argprs.error("Please specify a configuration file with -f")
-
-    main(options, args)
+    main()

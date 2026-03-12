@@ -4,6 +4,46 @@ requires = ["setuptools>=64",
             "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "vnc_fanout"
+description = "Simple VNC view-only session fanout (repeater)"
+readme = "README.md"
+license = {file = "LICENSE.md"}
+authors = [
+    {name = "Software Division, Subaru Telescope, NAOJ", email = "ocs@naoj.org"},
+]
+keywords = ["VNC", "repeater", "fanout"]
+requires-python = ">=3.11"
+dependencies = [
+    "pycryptodome>=3.23",
+]
+dynamic = ["version"]
+
 [tool.setuptools_scm]
 write_to = "vnc_fanout/version.py"
 version_scheme = "release-branch-semver"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["vnc_fanout*"]
+
+[project.scripts]
+vnc_fanout = "vnc_fanout.main:main"
+
+[tool.flake8]
+# Ignoring these for now:
+# E129: visually indented line with same indent as next logical line
+# E226: missing whitespace around arithmetic operator
+# E265: block comment should start with '#'
+# E266: too many leading '#' for block comment
+# E402: module level import not at top of file
+# E501: line too long
+# E741: ambiguous variable name 'l'
+# I100: import statements are in the wrong order
+# I101: imported names are in the wrong order
+# W504: line break after binary operator
+# F841: local variable '%s' is assigned to but never used
+# F824: global variable '%s' is never assigned in scope
+ignore = "E129,E226,E265,E266,E402,E501,E741,I100,I101,W504,F841,F824"
