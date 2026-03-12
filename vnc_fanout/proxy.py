@@ -157,7 +157,8 @@ class VNCProxy:
 
         On disconnect, cancels both tasks, closes the upstream socket,
         marks all clients for a full refresh, and retries the connection
-        every ``reconnect_delay`` seconds.
+        every ``reconnect_delay`` seconds.  If reconnect_delay is 0,
+        the proxy shuts down instead of reconnecting.
         """
         while True:
             update_task = asyncio.create_task(self.upstream_update_loop())
@@ -182,6 +183,21 @@ class VNCProxy:
 
             self._close_upstream()
 
+            if self.reconnect_delay == 0:
+                self.logger.info(
+                    "reconnect disabled, shutting down")
+                # Close all downstream clients
+                for client in list(self.clients):
+                    try:
+                        client.writer.close()
+                    except Exception:
+                        pass
+                self.clients.clear()
+                # Stop the downstream server so serve_forever() returns
+                self._server.close()
+                await self._server.wait_closed()
+                return
+
             # Mark all clients for a full refresh on reconnect.
             # Do NOT clear wants_update -- clients have already sent their
             # FramebufferUpdateRequest and are waiting for a response.
@@ -193,7 +209,7 @@ class VNCProxy:
             # Retry loop
             while True:
                 self.logger.info(
-                    f"reconnecting in {self.reconnect_delay}s...")
+                    f"attempting reconnection in {self.reconnect_delay}s...")
                 await asyncio.sleep(self.reconnect_delay)
                 try:
                     await self.connect_upstream()
@@ -514,12 +530,14 @@ class VNCProxy:
                 await self.connect_upstream()
                 break
             except Exception as e:
+                if self.reconnect_delay == 0:
+                    raise
                 self.logger.warning(f"upstream connection failed: {e}")
                 self.logger.info(
                     f"retrying in {self.reconnect_delay}s...")
                 await asyncio.sleep(self.reconnect_delay)
 
-        server = await asyncio.start_server(
+        self._server = await asyncio.start_server(
             self.handle_client,
             self.downstream_host,
             self.downstream_port
@@ -528,5 +546,8 @@ class VNCProxy:
         # Run upstream read/update tasks with reconnect in background
         asyncio.create_task(self._run_upstream())
 
-        async with server:
-            await server.serve_forever()
+        async with self._server:
+            try:
+                await self._server.serve_forever()
+            except asyncio.CancelledError:
+                pass

@@ -23,3 +23,6 @@ vnc_fanout/version.py
 
 # Mac OSX
 .DS_Store
+
+# etc
+.claude

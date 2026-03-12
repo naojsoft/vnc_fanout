@@ -17,6 +17,9 @@ Features and Limitations
 - Supports RAW and Tight encoding
 - Supports 24 and 32 bpp
 - Can have a different password for upstream and downstream connections
+- Can be configured to reconnect to upstream VNC while maintaining downsteam
+  connections if the upstream VNC server is shut down (only recovers if
+  restarted with the same geometry and depth though)
 - Supports only simple VNCAuth authentication
 
 Install

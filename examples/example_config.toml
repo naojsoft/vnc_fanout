@@ -10,7 +10,9 @@
 # log_backups = 4
 
 # seconds between upstream reconnect attempts (default 10)
-upstream_reconnect_delay = 10
+# If set to 0, then the fanout will not attempt to reconnect and
+# downstream clients will be disconnected
+upstream_reconnect_delay = 5
 
 
 [screen1.upstream]
