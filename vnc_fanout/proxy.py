@@ -57,7 +57,9 @@ def vnc_encrypt(challenge, password):
 # ------------------------------------------------------------
 
 class ClientState:
-    def __init__(self, reader, writer, pixel_format, can_control=False):
+    def __init__(self, client_id, reader, writer, pixel_format,
+                 can_control=False):
+        self.id = client_id
         self.reader = reader
         self.writer = writer
         self.wants_update = False
@@ -103,7 +105,8 @@ class VNCProxy:
         self.grab_keysym = GRAB_KEYSYMS[key]
         self.grab_key_name = grab_key
 
-        self.clients = set([])
+        self.clients = {}       # client_id -> ClientState
+        self._next_client_id = 1
         self.controller = None  # ClientState that holds the control token
 
         self.up_reader = None
@@ -219,7 +222,7 @@ class VNCProxy:
                 self.logger.info(
                     "reconnect disabled, shutting down")
                 # Close all downstream clients
-                for client in list(self.clients):
+                for client in list(self.clients.values()):
                     try:
                         client.writer.close()
                     except Exception:
@@ -235,7 +238,7 @@ class VNCProxy:
             # FramebufferUpdateRequest and are waiting for a response.
             # Clearing it would deadlock (proxy waits for request, client
             # waits for response).
-            for client in self.clients:
+            for client in self.clients.values():
                 client.needs_full = True
 
             # Retry loop
@@ -394,7 +397,7 @@ class VNCProxy:
         # Pre-tile once for all Tight clients
         tight_rects = None
 
-        for client in self.clients:
+        for client in self.clients.values():
             if not client.wants_update:
                 continue
 
@@ -428,10 +431,11 @@ class VNCProxy:
             except Exception as e:
                 dead.append(client)
                 self.logger.error(
-                    f"exception writing to client: {e}; closing...")
+                    f"exception writing to client {client.id}: "
+                    f"{e}; closing...")
 
         for c in dead:
-            self.clients.discard(c)
+            self.clients.pop(c.id, None)
 
     async def send_full_frame(self, client):
         if client.wants_tight:
@@ -465,11 +469,14 @@ class VNCProxy:
     async def handle_client(self, reader, writer):
         peername = writer.get_extra_info("peername")
         addr = f"{peername[0]}:{peername[1]}" if peername else "unknown"
-        self.logger.info(f"client connected: {addr}")
+
+        client_id = self._next_client_id
+        self._next_client_id += 1
+        self.logger.info(f"client {client_id} connected: {addr}")
 
         can_control = False
-        state = ClientState(reader, writer, self.pixel_format)
-        self.clients.add(state)
+        state = ClientState(client_id, reader, writer, self.pixel_format)
+        self.clients[client_id] = state
 
         try:
             # Version
@@ -501,10 +508,11 @@ class VNCProxy:
             state.can_control = can_control
             if can_control:
                 self.logger.info(
-                    f"client {addr} authenticated with control "
-                    f"(Ctrl+{self.grab_key_name} to grab)")
+                    f"client {client_id} ({addr}) authenticated with "
+                    f"control (Ctrl+{self.grab_key_name} to grab)")
             else:
-                self.logger.info(f"client {addr} authenticated view-only")
+                self.logger.info(
+                    f"client {client_id} ({addr}) authenticated view-only")
 
             writer.write(struct.pack(">I", 0))
             await writer.drain()
@@ -549,8 +557,9 @@ class VNCProxy:
                     keysym = struct.unpack(">I", payload[3:7])[0]
 
                     self.logger.debug(
-                        f"KeyEvent from {addr}: keysym=0x{keysym:04x} "
-                        f"down={down} ctrl={state.ctrl_pressed} "
+                        f"KeyEvent from client {client_id}: "
+                        f"keysym=0x{keysym:04x} down={down} "
+                        f"ctrl={state.ctrl_pressed} "
                         f"can_control={state.can_control}")
 
                     # Track Ctrl state for grab sequence
@@ -563,7 +572,7 @@ class VNCProxy:
                         if self.controller is not state:
                             self.controller = state
                             self.logger.info(
-                                f"client {addr} grabbed control")
+                                f"client {client_id} grabbed control")
                         # Consume the grab key -- don't forward
                         continue
 
@@ -573,7 +582,7 @@ class VNCProxy:
                             self.controller is state:
                         self.controller = None
                         self.logger.info(
-                            f"client {addr} released control")
+                            f"client {client_id} released control")
                         continue
 
                     # Forward to upstream if this client has control
@@ -602,17 +611,18 @@ class VNCProxy:
                     break
 
         except (asyncio.IncompleteReadError, ConnectionResetError):
-            self.logger.info(f"client disconnected: {addr}")
+            self.logger.info(f"client {client_id} disconnected: {addr}")
 
         except Exception as e:
-            self.logger.error(f"exception handling client: {e}", exc_info=True)
+            self.logger.error(f"exception handling client {client_id}: {e}",
+                              exc_info=True)
 
         finally:
             if self.controller is state:
                 self.controller = None
                 self.logger.info(
-                    f"client {addr} released control (disconnected)")
-            self.clients.discard(state)
+                    f"client {client_id} released control (disconnected)")
+            self.clients.pop(client_id, None)
             writer.close()
 
     # --------------------------------------------------------
