@@ -79,15 +79,19 @@ def run_proxy(scr_d):
     upstream_host = scr_d['upstream'].get('vnc_host', "localhost")
     upstream_port = scr_d['upstream'].get('vnc_port', None)
     upstream_password = scr_d['upstream'].get('vnc_password', None)
+    upstream_tls = scr_d['upstream'].get('vnc_tls', False)
+    upstream_tls_ca = scr_d['upstream'].get('vnc_tls_ca', None)
 
     downstream_host = scr_d['downstream'].get('proxy_host', "localhost")
     downstream_port = scr_d['downstream'].get('proxy_port', None)
-    downstream_password = scr_d['downstream'].get('proxy_password', None)
+    downstream_viewonly_password = scr_d['downstream'].get('proxy_viewonly_password', None)
     downstream_control_password = scr_d['downstream'].get(
         'proxy_control_password', None)
 
     reconnect_delay = scr_d.get('upstream_reconnect_delay', 10)
     grab_key = scr_d['downstream'].get('grab_key', 'f1')
+    downstream_tls_cert = scr_d['downstream'].get('proxy_tls_cert', None)
+    downstream_tls_key = scr_d['downstream'].get('proxy_tls_key', None)
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -97,10 +101,14 @@ def run_proxy(scr_d):
                              upstream_password,
                              downstream_host,
                              downstream_port,
-                             downstream_password,
+                             downstream_viewonly_password,
                              downstream_control_password=downstream_control_password,
                              reconnect_delay=reconnect_delay,
-                             grab_key=grab_key).start())
+                             grab_key=grab_key,
+                             downstream_tls_cert=downstream_tls_cert,
+                             downstream_tls_key=downstream_tls_key,
+                             upstream_tls=upstream_tls,
+                             upstream_tls_ca=upstream_tls_ca).start())
 
     except Exception as e:
         logger.error(f"exception in {name} VNC fanout proxy: {e}",

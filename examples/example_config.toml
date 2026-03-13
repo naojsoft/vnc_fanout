@@ -1,8 +1,8 @@
 
 [screen1]
-# can assign a log file and a logging level
+# optionally, assign a log file and a logging level
 #logfile = "vnc_fanout_screen1.log"
-#loglevel = 20
+#loglevel = 10
 
 # max size of log file before rotating (example 20MB)
 # log_maxsize = 20971520
@@ -19,23 +19,42 @@ upstream_reconnect_delay = 5
 # this is the actual VNC server we are connecting to
 vnc_host = "localhost"
 vnc_port = 5909
-# VNC server p/w
+# VNC server p/w. This needs to be the control password if you want to
+# control and/or view-only connections downstream (see difference
+# between downstream control and view-only passwords)
 vnc_password = "foobar9"
+
+# optional: enable VeNCrypt TLS encryption for upstream connection
+#vnc_tls = true
+# optional: CA certificate for verifying upstream server (X509Vnc).
+# If omitted, server certificate is not verified.
+#vnc_tls_ca = "/path/to/ca.pem"
 
 [screen1.downstream]
 # which interface and port to bind our proxy server on
 proxy_host = "localhost"
 proxy_port = 5910
 # we can have a different password for the proxy vnc server
-proxy_password = "hellokitty"
+proxy_viewonly_password = "hellokitty"
+
 # optional: clients authenticating with this password can claim
 # control of the upstream session using Ctrl+F1.  If not set, all
 # clients are view-only.
-#proxy_control_password = "secretcontrol"
+proxy_control_password = "secretcontrol"
+
 # key to press with Ctrl to grab control (default "f1")
 # valid keys: delete, end, escape, f1-f12, home, insert,
 #             pause, scroll_lock, space, tab
 #grab_key = "f1"
+
+# optional: enable TLS encryption for downstream clients (VeNCrypt).
+# Requires a PEM certificate and key file.  When set, clients can
+# connect with VeNCrypt (encrypted) or plain VNC auth (unencrypted).
+# Generate a self-signed cert:
+#   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+#     -days 365 -nodes -subj "/CN=vnc_fanout"
+#proxy_tls_cert = "/path/to/cert.pem"
+#proxy_tls_key = "/path/to/key.pem"
 
 
 # define as many screens here as you want--all have the above format

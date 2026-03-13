@@ -3,6 +3,7 @@
 #
 # stdlib imports
 import asyncio
+import ssl
 import struct
 
 # 3rd party
@@ -31,6 +32,10 @@ DEFAULT_GRAB_KEY = "f1"
 
 # Ctrl + this key releases the control token
 RELEASE_KEYSYM = 0xff1b  # Escape
+
+# VeNCrypt sub-types
+VENCRYPT_TLSVNC = 258    # TLS + VNC authentication
+VENCRYPT_X509VNC = 261   # X.509 cert + VNC authentication
 
 __all__ = ["VNCProxy"]
 
@@ -83,17 +88,19 @@ class VNCProxy:
 
     def __init__(self, logger,
                  upstream_host, upstream_port, upstream_password,
-                 downstream_host, downstream_port, downstream_password,
+                 downstream_host, downstream_port, downstream_viewonly_password,
                  downstream_control_password=None,
                  reconnect_delay=5,
-                 grab_key=DEFAULT_GRAB_KEY):
+                 grab_key=DEFAULT_GRAB_KEY,
+                 downstream_tls_cert=None, downstream_tls_key=None,
+                 upstream_tls=False, upstream_tls_ca=None):
         self.logger = logger
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
         self.upstream_password = upstream_password
         self.downstream_host = downstream_host
         self.downstream_port = downstream_port
-        self.downstream_password = downstream_password
+        self.downstream_viewonly_password = downstream_viewonly_password
         self.downstream_control_password = downstream_control_password
         self.reconnect_delay = reconnect_delay
 
@@ -104,6 +111,19 @@ class VNCProxy:
                 f"valid keys: {', '.join(sorted(GRAB_KEYSYMS))}")
         self.grab_keysym = GRAB_KEYSYMS[key]
         self.grab_key_name = grab_key
+
+        # TLS for upstream VeNCrypt
+        self.upstream_tls = upstream_tls
+        self.upstream_tls_ca = upstream_tls_ca
+        if self.upstream_tls:
+            self.logger.info("TLS enabled for upstream (VeNCrypt)")
+
+        # TLS for downstream VeNCrypt
+        self.downstream_tls_cert = downstream_tls_cert
+        self.downstream_tls_key = downstream_tls_key
+        self._tls_enabled = downstream_tls_cert is not None
+        if self._tls_enabled:
+            self.logger.info("TLS enabled for downstream (VeNCrypt)")
 
         self.clients = {}       # client_id -> ClientState
         self._next_client_id = 1
@@ -140,11 +160,23 @@ class VNCProxy:
         await self.up_writer.drain()
 
         nsec = ord(await self.up_reader.readexactly(1))
-        sec_types = await self.up_reader.readexactly(nsec)  # noqa
+        sec_types = await self.up_reader.readexactly(nsec)
 
-        self.up_writer.write(b"\x02")
-        await self.up_writer.drain()
+        if self.upstream_tls and 19 in sec_types:
+            # Choose VeNCrypt (security type 19)
+            self.up_writer.write(b"\x13")
+            await self.up_writer.drain()
+            await self._upstream_vencrypt_handshake()
+        elif 2 in sec_types:
+            # Plain VNC auth (security type 2)
+            self.up_writer.write(b"\x02")
+            await self.up_writer.drain()
+        else:
+            raise RuntimeError(
+                f"No supported upstream security type "
+                f"(offered: {list(sec_types)})")
 
+        # VNC auth challenge-response (runs over TLS if VeNCrypt)
         challenge = await self.up_reader.readexactly(16)
         self.up_writer.write(vnc_encrypt(challenge, self.upstream_password))
         await self.up_writer.drain()
@@ -176,6 +208,79 @@ class VNCProxy:
         await self.up_writer.drain()
 
         self.logger.info("upstream connected")
+
+    async def _upstream_vencrypt_handshake(self):
+        """Perform VeNCrypt sub-negotiation as a client and upgrade to TLS."""
+        reader, writer = self.up_reader, self.up_writer
+
+        # Version exchange -- server sends its version, we reply 0.2
+        srv_major, srv_minor = struct.unpack(
+            ">BB", await reader.readexactly(2))
+        writer.write(struct.pack(">BB", 0, 2))
+        await writer.drain()
+
+        # Server ack
+        ack = ord(await reader.readexactly(1))
+        if ack != 0:
+            raise RuntimeError("Upstream VeNCrypt version rejected")
+
+        # Read offered sub-types
+        n_sub = ord(await reader.readexactly(1))
+        sub_data = await reader.readexactly(4 * n_sub)
+        sub_types = [struct.unpack(">I", sub_data[i*4:(i+1)*4])[0]
+                     for i in range(n_sub)]
+        self.logger.debug(f"upstream VeNCrypt sub-types: {sub_types}")
+
+        # Prefer X509Vnc if we have a CA, otherwise TLSVnc
+        chosen = None
+        preferred = [VENCRYPT_X509VNC, VENCRYPT_TLSVNC]
+        for st in preferred:
+            if st in sub_types:
+                chosen = st
+                break
+        if chosen is None:
+            raise RuntimeError(
+                f"No supported upstream VeNCrypt sub-type "
+                f"(offered: {sub_types})")
+
+        writer.write(struct.pack(">I", chosen))
+        await writer.drain()
+
+        # Server confirms
+        ok = ord(await reader.readexactly(1))
+        if ok != 1:
+            raise RuntimeError("Upstream rejected VeNCrypt sub-type")
+
+        # Build client-side SSL context
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if chosen == VENCRYPT_TLSVNC:
+            # Anonymous TLS -- no server certificate verification
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            ssl_ctx.set_ciphers("aNULL:@SECLEVEL=0")
+            self.logger.debug("upstream VeNCrypt: TLSVnc (anonymous DH)")
+        else:
+            # X509Vnc -- verify server certificate if CA provided
+            if self.upstream_tls_ca:
+                ssl_ctx.load_verify_locations(self.upstream_tls_ca)
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+            else:
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+            self.logger.debug("upstream VeNCrypt: X509Vnc")
+
+        # Upgrade to TLS
+        transport = writer.transport
+        protocol = transport.get_protocol()
+        loop = asyncio.get_running_loop()
+        new_transport = await loop.start_tls(
+            transport, protocol, ssl_ctx, server_side=False)
+
+        self.up_writer = asyncio.StreamWriter(
+            new_transport, protocol, reader, loop)
+        # reader is updated by protocol.connection_made()
+        self.logger.info("upstream TLS handshake complete")
 
     def _close_upstream(self):
         """Close the upstream connection if open."""
@@ -463,6 +568,79 @@ class VNCProxy:
         await client.writer.drain()
 
     # --------------------------------------------------------
+    # VENCRYPT
+    # --------------------------------------------------------
+
+    async def _vencrypt_handshake(self, reader, writer):
+        """Perform VeNCrypt sub-negotiation and upgrade to TLS.
+
+        Returns a new (reader, writer) pair wrapping the TLS connection,
+        or (None, None) on failure.  The VNC auth challenge-response
+        happens after this, over the encrypted channel.
+        """
+        # VeNCrypt version exchange (we support 0.2)
+        writer.write(struct.pack(">BB", 0, 2))
+        await writer.drain()
+
+        client_major, client_minor = struct.unpack(
+            ">BB", await reader.readexactly(2))
+
+        if (client_major, client_minor) < (0, 2):
+            writer.write(b"\xff")  # version not OK
+            await writer.drain()
+            return None, None
+
+        writer.write(b"\x00")  # version OK
+        await writer.drain()
+
+        # Offer both TLSVnc (258) and X509Vnc (261) sub-types
+        sub_types = [VENCRYPT_TLSVNC, VENCRYPT_X509VNC]
+        writer.write(struct.pack(">B", len(sub_types)))
+        for st in sub_types:
+            writer.write(struct.pack(">I", st))
+        await writer.drain()
+
+        chosen = struct.unpack(">I", await reader.readexactly(4))[0]
+        if chosen not in sub_types:
+            writer.write(b"\x00")  # sub-type not accepted
+            await writer.drain()
+            return None, None
+
+        writer.write(b"\x01")  # sub-type OK, proceed to TLS
+        await writer.drain()
+
+        # Build an SSL context appropriate for the chosen sub-type.
+        # TLSVnc (258) uses anonymous DH -- no certificate, aNULL ciphers.
+        # X509Vnc (261) uses certificate-based TLS -- standard ciphers.
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        if chosen == VENCRYPT_TLSVNC:
+            ssl_ctx.set_ciphers("aNULL:@SECLEVEL=0")
+            self.logger.debug("VeNCrypt: using TLSVnc (anonymous DH)")
+        else:
+            ssl_ctx.load_cert_chain(self.downstream_tls_cert,
+                                    self.downstream_tls_key)
+            ssl_ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+            self.logger.debug("VeNCrypt: using X509Vnc (certificate)")
+
+        # Upgrade the transport to TLS.
+        # start_tls() auto-calls protocol.connection_made() with the
+        # new transport, which updates the reader's transport ref.
+        transport = writer.transport
+        protocol = transport.get_protocol()
+        loop = asyncio.get_running_loop()
+        new_transport = await loop.start_tls(
+            transport, protocol, ssl_ctx, server_side=True)
+
+        # The existing reader is updated by protocol.connection_made(),
+        # but we need a new writer pointing to the TLS transport.
+        new_writer = asyncio.StreamWriter(
+            new_transport, protocol, reader, loop)
+
+        return reader, new_writer
+
+    # --------------------------------------------------------
     # CLIENT HANDLER
     # --------------------------------------------------------
 
@@ -484,11 +662,33 @@ class VNCProxy:
             await writer.drain()
             await reader.readexactly(12)
 
-            # Auth
-            writer.write(b"\x01\x02")
-            await writer.drain()
-            await reader.readexactly(1)
+            # Security type negotiation
+            if self._tls_enabled:
+                # Offer VeNCrypt (19) and plain VNC auth (2)
+                writer.write(b"\x02\x13\x02")  # 2 types: 19, 2
+                await writer.drain()
+                sec_type = ord(await reader.readexactly(1))
 
+                if sec_type == 19:  # VeNCrypt
+                    new_reader, new_writer = \
+                        await self._vencrypt_handshake(reader, writer)
+                    if new_reader is None:
+                        return
+                    reader = new_reader
+                    writer = new_writer
+                    state.reader = reader
+                    state.writer = writer
+                    self.logger.info(
+                        f"client {client_id} upgraded to TLS")
+                elif sec_type != 2:
+                    return
+            else:
+                # No TLS -- offer plain VNC auth only
+                writer.write(b"\x01\x02")
+                await writer.drain()
+                await reader.readexactly(1)
+
+            # VNC auth challenge-response
             challenge = b"ProxyAuthChallenge!"[:16]
             writer.write(challenge)
             await writer.drain()
@@ -500,7 +700,7 @@ class VNCProxy:
                     resp == vnc_encrypt(challenge,
                                         self.downstream_control_password):
                 can_control = True
-            elif resp != vnc_encrypt(challenge, self.downstream_password):
+            elif resp != vnc_encrypt(challenge, self.downstream_viewonly_password):
                 writer.write(struct.pack(">I", 1))
                 await writer.drain()
                 return
