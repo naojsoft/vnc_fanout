@@ -55,6 +55,10 @@ proxy_control_password = "secretcontrol"
 #     -days 365 -nodes -subj "/CN=vnc_fanout"
 #proxy_tls_cert = "/path/to/cert.pem"
 #proxy_tls_key = "/path/to/key.pem"
+# optional: require TLS for all downstream clients (reject unencrypted
+# connections).  Only effective when proxy_tls_cert and proxy_tls_key
+# are set.
+#proxy_tls_required = true
 
 
 # define as many screens here as you want--all have the above format

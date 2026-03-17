@@ -93,6 +93,7 @@ class VNCProxy:
                  reconnect_delay=5,
                  grab_key=DEFAULT_GRAB_KEY,
                  downstream_tls_cert=None, downstream_tls_key=None,
+                 downstream_tls_required=False,
                  upstream_tls=False, upstream_tls_ca=None):
         self.logger = logger
         self.upstream_host = upstream_host
@@ -122,8 +123,11 @@ class VNCProxy:
         self.downstream_tls_cert = downstream_tls_cert
         self.downstream_tls_key = downstream_tls_key
         self._tls_enabled = downstream_tls_cert is not None
+        self._tls_required = downstream_tls_required and self._tls_enabled
         if self._tls_enabled:
-            self.logger.info("TLS enabled for downstream (VeNCrypt)")
+            mode = "required" if self._tls_required else "optional"
+            self.logger.info(
+                f"TLS enabled for downstream (VeNCrypt, {mode})")
 
         self.clients = {}       # client_id -> ClientState
         self._next_client_id = 1
@@ -664,8 +668,12 @@ class VNCProxy:
 
             # Security type negotiation
             if self._tls_enabled:
-                # Offer VeNCrypt (19) and plain VNC auth (2)
-                writer.write(b"\x02\x13\x02")  # 2 types: 19, 2
+                if self._tls_required:
+                    # Only offer VeNCrypt (19) -- no unencrypted fallback
+                    writer.write(b"\x01\x13")  # 1 type: 19
+                else:
+                    # Offer VeNCrypt (19) and plain VNC auth (2)
+                    writer.write(b"\x02\x13\x02")  # 2 types: 19, 2
                 await writer.drain()
                 sec_type = ord(await reader.readexactly(1))
 
@@ -680,7 +688,9 @@ class VNCProxy:
                     state.writer = writer
                     self.logger.info(
                         f"client {client_id} upgraded to TLS")
-                elif sec_type != 2:
+                elif sec_type == 2 and not self._tls_required:
+                    pass  # plain VNC auth, allowed
+                else:
                     return
             else:
                 # No TLS -- offer plain VNC auth only

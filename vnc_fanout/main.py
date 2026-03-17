@@ -92,6 +92,7 @@ def run_proxy(scr_d):
     grab_key = scr_d['downstream'].get('grab_key', 'f1')
     downstream_tls_cert = scr_d['downstream'].get('proxy_tls_cert', None)
     downstream_tls_key = scr_d['downstream'].get('proxy_tls_key', None)
+    downstream_tls_required = scr_d['downstream'].get('proxy_tls_required', False)
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -107,6 +108,7 @@ def run_proxy(scr_d):
                              grab_key=grab_key,
                              downstream_tls_cert=downstream_tls_cert,
                              downstream_tls_key=downstream_tls_key,
+                             downstream_tls_required=downstream_tls_required,
                              upstream_tls=upstream_tls,
                              upstream_tls_ca=upstream_tls_ca).start())
 
