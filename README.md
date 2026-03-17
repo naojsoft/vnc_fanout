@@ -56,6 +56,19 @@ $ vnc_fanout -f examples/example_config.toml
 See the example config file for the format and options.
 
 
+Servers Tested With
+===================
+- Tiger VNC server 
+
+
+Clients Tested With
+===================
+- Tiger VNC viewer
+- Tight VNC viewer
+- noVNC
+- Guacamole
+
+
 More Documentation
 ==================
 See the [User Manual](USER_MANUAL.md)
