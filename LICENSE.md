@@ -1,4 +1,4 @@
-Copyright (C) 2026 by National Astronomical Observatory of Japan
+Copyright (C) 2026 by VNC_Fanout developers
 
 Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted.
 

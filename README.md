@@ -3,8 +3,9 @@ About
 This is a VNC fanout script that makes a connection to an "upstream" actual
 VNC (RFB) server and fans that single connection out to multiple "downstream"
 clients.  The goal is to reduce the load on the VNC server by making only a
-single view-only TCP connection to the actual VNC server.  An additional
-benefit is that a different VNC password can be used for the fanout.
+single TCP connection to the actual VNC server.  An additional benefit is
+that different client passwords can be used for the fanout than to the actual
+server.
 
 
 License
@@ -54,3 +55,7 @@ $ vnc_fanout -f examples/example_config.toml
 
 See the example config file for the format and options.
 
+
+More Documentation
+==================
+See the [User Manual](USER_MANUAL.md)

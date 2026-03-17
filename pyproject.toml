@@ -10,7 +10,7 @@ description = "Simple VNC view-only session fanout (repeater)"
 readme = "README.md"
 license = {file = "LICENSE.md"}
 authors = [
-    {name = "Software Division, Subaru Telescope, NAOJ", email = "ocs@naoj.org"},
+    {name = "VNC_Fanout developers"},
 ]
 keywords = ["VNC", "repeater", "fanout"]
 requires-python = ">=3.11"
