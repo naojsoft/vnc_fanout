@@ -33,6 +33,11 @@ DEFAULT_GRAB_KEY = "f1"
 # Ctrl + this key releases the control token
 RELEASE_KEYSYM = 0xff1b  # Escape
 
+# Default seconds to wait for a downstream client to accept an update
+# before disconnecting it.  Dispatch runs in the upstream read path, so a
+# client that stops reading would otherwise freeze the fanout for everyone.
+DEFAULT_CLIENT_WRITE_TIMEOUT = 10.0
+
 # VeNCrypt sub-types
 VENCRYPT_TLSVNC = 258    # TLS + VNC authentication
 VENCRYPT_X509VNC = 261   # X.509 cert + VNC authentication
@@ -94,7 +99,8 @@ class VNCProxy:
                  grab_key=DEFAULT_GRAB_KEY,
                  downstream_tls_cert=None, downstream_tls_key=None,
                  downstream_tls_required=False,
-                 upstream_tls=False, upstream_tls_ca=None):
+                 upstream_tls=False, upstream_tls_ca=None,
+                 client_write_timeout=DEFAULT_CLIENT_WRITE_TIMEOUT):
         self.logger = logger
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
@@ -104,6 +110,7 @@ class VNCProxy:
         self.downstream_viewonly_password = downstream_viewonly_password
         self.downstream_control_password = downstream_control_password
         self.reconnect_delay = reconnect_delay
+        self.client_write_timeout = client_write_timeout
 
         key = grab_key.lower()
         if key not in GRAB_KEYSYMS:
@@ -506,7 +513,9 @@ class VNCProxy:
         # Pre-tile once for all Tight clients
         tight_rects = None
 
-        for client in self.clients.values():
+        # Iterate over a snapshot: drain() yields to the event loop, during
+        # which clients may connect or disconnect and modify self.clients.
+        for client in list(self.clients.values()):
             if not client.wants_update:
                 continue
 
@@ -536,7 +545,13 @@ class VNCProxy:
                     msg = raw_msg
 
                 client.writer.write(msg)
-                await client.writer.drain()
+                await asyncio.wait_for(client.writer.drain(),
+                                       self.client_write_timeout)
+            except asyncio.TimeoutError:
+                dead.append(client)
+                self.logger.error(
+                    f"client {client.id} not reading updates for "
+                    f"{self.client_write_timeout}s; closing...")
             except Exception as e:
                 dead.append(client)
                 self.logger.error(
@@ -545,6 +560,12 @@ class VNCProxy:
 
         for c in dead:
             self.clients.pop(c.id, None)
+            # Closing the transport also ends the client's handle_client()
+            # task, which releases the control token if held.
+            try:
+                c.writer.transport.abort()
+            except Exception:
+                pass
 
     async def send_full_frame(self, client):
         if client.wants_tight:

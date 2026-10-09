@@ -47,6 +47,11 @@ proxy_control_password = "secretcontrol"
 #             pause, scroll_lock, space, tab
 #grab_key = "f1"
 
+# seconds to wait for a client to accept a screen update before
+# disconnecting it (default 10).  A client that stops reading stalls
+# updates to ALL clients for up to this long.
+#client_write_timeout = 10
+
 # optional: enable TLS encryption for downstream clients (VeNCrypt).
 # Requires a PEM certificate and key file.  When set, clients can
 # connect with VeNCrypt (encrypted) or plain VNC auth (unencrypted).

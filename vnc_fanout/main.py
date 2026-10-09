@@ -93,6 +93,8 @@ def run_proxy(scr_d):
     downstream_tls_cert = scr_d['downstream'].get('proxy_tls_cert', None)
     downstream_tls_key = scr_d['downstream'].get('proxy_tls_key', None)
     downstream_tls_required = scr_d['downstream'].get('proxy_tls_required', False)
+    client_write_timeout = scr_d['downstream'].get('client_write_timeout',
+                                                   10.0)
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -110,7 +112,8 @@ def run_proxy(scr_d):
                              downstream_tls_key=downstream_tls_key,
                              downstream_tls_required=downstream_tls_required,
                              upstream_tls=upstream_tls,
-                             upstream_tls_ca=upstream_tls_ca).start())
+                             upstream_tls_ca=upstream_tls_ca,
+                             client_write_timeout=client_write_timeout).start())
 
     except Exception as e:
         logger.error(f"exception in {name} VNC fanout proxy: {e}",
