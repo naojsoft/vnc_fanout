@@ -95,6 +95,7 @@ def run_proxy(scr_d):
     downstream_tls_required = scr_d['downstream'].get('proxy_tls_required', False)
     client_write_timeout = scr_d['downstream'].get('client_write_timeout',
                                                    10.0)
+    send_queues = scr_d['downstream'].get('send_queues', False)
 
     try:
         logger.info(f"starting {name} VNC fanout proxy...")
@@ -113,7 +114,8 @@ def run_proxy(scr_d):
                              downstream_tls_required=downstream_tls_required,
                              upstream_tls=upstream_tls,
                              upstream_tls_ca=upstream_tls_ca,
-                             client_write_timeout=client_write_timeout).start())
+                             client_write_timeout=client_write_timeout,
+                             send_queues=send_queues).start())
 
     except Exception as e:
         logger.error(f"exception in {name} VNC fanout proxy: {e}",
@@ -132,6 +134,10 @@ def main():
                         help="Specify FILE as configuration file")
     argprs.add_argument("--pidfile", dest="pidfile", metavar="FILE",
                         default=None, help="Write pid of process to FILE")
+    argprs.add_argument("--send-queues", dest="send_queues",
+                        action="store_true", default=False,
+                        help="Use per-client send queues for all screens "
+                        "(overrides send_queues in the config file)")
 
     (options, args) = argprs.parse_known_args(sys.argv[1:])
     if len(args) != 0:
@@ -153,6 +159,8 @@ def main():
         scr_d = cfg_d[key]
         if 'name' not in scr_d:
             scr_d['name'] = key
+        if options.send_queues:
+            scr_d.setdefault('downstream', {})['send_queues'] = True
         cfgs.append(scr_d)
 
     if options.pidfile is not None:

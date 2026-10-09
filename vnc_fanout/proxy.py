@@ -3,6 +3,7 @@
 #
 # stdlib imports
 import asyncio
+import collections
 import ssl
 import struct
 
@@ -37,6 +38,11 @@ RELEASE_KEYSYM = 0xff1b  # Escape
 # before disconnecting it.  Dispatch runs in the upstream read path, so a
 # client that stops reading would otherwise freeze the fanout for everyone.
 DEFAULT_CLIENT_WRITE_TIMEOUT = 10.0
+
+# Max pending update data per client, in multiples of the framebuffer
+# size.  A client whose backlog exceeds this gets a single full frame
+# instead, which bounds memory use for clients that fall behind.
+MAX_QUEUED_FRAMES = 2
 
 # VeNCrypt sub-types
 VENCRYPT_TLSVNC = 258    # TLS + VNC authentication
@@ -73,7 +79,14 @@ class ClientState:
         self.reader = reader
         self.writer = writer
         self.wants_update = False
-        self.needs_full = True
+        # send a full frame (built from the current framebuffer) next
+        self.needs_full = False
+        # pending _Update objects, drained by VNCProxy._client_writer()
+        self.queue = collections.deque()
+        self.queued_bytes = 0
+        self.has_data = asyncio.Event()
+        self.writer_task = None
+        self.fell_behind = 0  # times backlog was replaced by a full frame
         self.supported_encodings = []
         self.zlib_streams = [None, None, None, None]
         self.pixel_format = pixel_format
@@ -83,6 +96,52 @@ class ClientState:
     @property
     def wants_tight(self):
         return 7 in self.supported_encodings
+
+
+class _Update:
+    """One upstream FramebufferUpdate, shared by all client queues.
+
+    The RAW message and the Tight tiling are built on first use and
+    cached, so that work is done at most once regardless of how many
+    clients receive the update.  Rectangle data is immutable (bytes
+    read from upstream), so it is safe to hold while clients catch up.
+    """
+
+    def __init__(self, proxy, rects):
+        self.proxy = proxy
+        self.rects = rects
+        self.size = sum(len(r[4]) for r in rects)
+        self._raw_msg = None
+        self._tiles = None
+
+    def msg_for(self, client):
+        if client.wants_tight:
+            return self._tight_msg(client)
+        return self._raw()
+
+    def _raw(self):
+        if self._raw_msg is None:
+            msg = bytearray(b"\x00\x00")
+            msg += struct.pack(">H", len(self.rects))
+            for x, y, w, h, data in self.rects:
+                msg += struct.pack(">HHHHi", x, y, w, h, 0)
+                msg += data
+            self._raw_msg = bytes(msg)
+        return self._raw_msg
+
+    def _tight_msg(self, client):
+        proxy = self.proxy
+        if self._tiles is None:
+            self._tiles = []
+            for x, y, w, h, data in self.rects:
+                self._tiles.extend(proxy._tile_rect(x, y, w, h, data))
+        msg = bytearray(b"\x00\x00")
+        msg += struct.pack(">H", len(self._tiles))
+        for x, y, w, h, data in self._tiles:
+            msg += struct.pack(">HHHHi", x, y, w, h, 7)
+            msg += tight.encode_rect(data, w, h, proxy.pixel_format,
+                                     proxy.bpp, client)
+        return msg
 
 
 # ------------------------------------------------------------
@@ -100,7 +159,8 @@ class VNCProxy:
                  downstream_tls_cert=None, downstream_tls_key=None,
                  downstream_tls_required=False,
                  upstream_tls=False, upstream_tls_ca=None,
-                 client_write_timeout=DEFAULT_CLIENT_WRITE_TIMEOUT):
+                 client_write_timeout=DEFAULT_CLIENT_WRITE_TIMEOUT,
+                 send_queues=False):
         self.logger = logger
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
@@ -111,6 +171,11 @@ class VNCProxy:
         self.downstream_control_password = downstream_control_password
         self.reconnect_delay = reconnect_delay
         self.client_write_timeout = client_write_timeout
+        # per-client send queues (see _dispatch_queued) vs. writing to
+        # each client in turn (see _dispatch_direct)
+        self.send_queues = send_queues
+        if self.send_queues:
+            self.logger.info("per-client send queues enabled")
 
         key = grab_key.lower()
         if key not in GRAB_KEYSYMS:
@@ -349,13 +414,12 @@ class VNCProxy:
                 await self._server.wait_closed()
                 return
 
-            # Mark all clients for a full refresh on reconnect.
-            # Do NOT clear wants_update -- clients have already sent their
+            # Clients are refreshed by the full upstream frame requested
+            # on reconnect (upstream_update_loop).  Do NOT clear
+            # wants_update -- clients have already sent their
             # FramebufferUpdateRequest and are waiting for a response.
             # Clearing it would deadlock (proxy waits for request, client
             # waits for response).
-            for client in self.clients.values():
-                client.needs_full = True
 
             # Retry loop
             while True:
@@ -421,7 +485,13 @@ class VNCProxy:
 
                 rectangles.append((x, y, w, h, data))
 
-            await self.dispatch_rectangles(rectangles)
+            if self.send_queues:
+                self._dispatch_queued(rectangles)
+                # readexactly() does not yield while data is buffered, so
+                # give the client writer tasks a chance to run.
+                await asyncio.sleep(0)
+            else:
+                await self._dispatch_direct(rectangles)
 
     def apply_rect(self, x, y, w, h, data):
         stride = self.fb_width * self.bpp
@@ -491,8 +561,12 @@ class VNCProxy:
             ty += th
         return tiles
 
-    async def dispatch_rectangles(self, rects):
-        """Fan out a FramebufferUpdate to all active clients.
+    async def _dispatch_direct(self, rects):
+        """Fan out a FramebufferUpdate by writing to each client in turn.
+
+        Used when send_queues is False.  A client that is slow to read
+        delays updates to all clients (and upstream reads) until it
+        catches up or client_write_timeout expires.
 
         Performance: expensive work is done at most once regardless of
         client count.  The RAW message is built once and shared across
@@ -567,7 +641,99 @@ class VNCProxy:
             except Exception:
                 pass
 
-    async def send_full_frame(self, client):
+    async def _send_full_frame_direct(self, client):
+        client.writer.write(self._full_frame_msg(client))
+        await client.writer.drain()
+
+    def _dispatch_queued(self, rects):
+        """Fan out a FramebufferUpdate via per-client send queues.
+
+        Used when send_queues is True.  Does not write to any socket:
+        the update is appended to each client's send queue and that
+        client's writer task (see
+        _client_writer) encodes and sends it.  A slow or stalled client
+        therefore only delays itself, never the upstream read path or
+        other clients.
+
+        Performance: expensive work is done at most once regardless of
+        client count.  The shared _Update object lazily builds the RAW
+        message and the Tight tiling once and caches them for all
+        clients (per-client zlib encoding is still required since each
+        client has its own zlib stream state).
+        """
+        update = _Update(self, rects)
+        max_queued = MAX_QUEUED_FRAMES * len(self.framebuffer)
+
+        for client in self.clients.values():
+            if not client.wants_update or client.writer_task is None:
+                continue
+            if client.needs_full:
+                # A full frame is pending; it is built from the
+                # framebuffer when sent, so it will include this update.
+                continue
+            if client.queued_bytes + update.size > max_queued:
+                # Client has fallen too far behind: drop its backlog and
+                # catch it up with a single full frame instead.
+                client.fell_behind += 1
+                log = self.logger.info if client.fell_behind == 1 \
+                    else self.logger.debug
+                log(f"client {client.id} fell behind "
+                    f"({client.fell_behind}x); "
+                    f"sending full frame instead of backlog")
+                client.queue.clear()
+                client.queued_bytes = 0
+                client.needs_full = True
+            else:
+                client.queue.append(update)
+                client.queued_bytes += update.size
+            client.has_data.set()
+
+    async def _client_writer(self, client):
+        """Per-client task: encode and send queued updates to ``client``.
+
+        If the client does not accept an update within
+        client_write_timeout seconds, its connection is aborted, which
+        also ends its handle_client() task.
+        """
+        try:
+            while True:
+                await client.has_data.wait()
+                if client.needs_full:
+                    client.needs_full = False
+                    client.queue.clear()
+                    client.queued_bytes = 0
+                    msg = self._full_frame_msg(client)
+                elif client.queue:
+                    update = client.queue.popleft()
+                    client.queued_bytes -= update.size
+                    msg = update.msg_for(client)
+                else:
+                    client.has_data.clear()
+                    continue
+
+                client.writer.write(msg)
+                await asyncio.wait_for(client.writer.drain(),
+                                       self.client_write_timeout)
+
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            self.logger.error(
+                f"client {client.id} not reading updates for "
+                f"{self.client_write_timeout}s; closing...")
+        except Exception as e:
+            self.logger.error(
+                f"exception writing to client {client.id}: "
+                f"{e}; closing...")
+        # handle_client() sees the closed connection and cleans up,
+        # including releasing the control token if held.
+        try:
+            client.writer.transport.abort()
+        except Exception:
+            pass
+
+    def _full_frame_msg(self, client):
+        """Build a FramebufferUpdate covering the whole framebuffer."""
         if client.wants_tight:
             strips = self._tile_rect(0, 0,
                                      self.fb_width, self.fb_height,
@@ -588,9 +754,7 @@ class VNCProxy:
                                self.fb_height,
                                0)
             msg += self.framebuffer
-
-        client.writer.write(msg)
-        await client.writer.drain()
+        return msg
 
     # --------------------------------------------------------
     # VENCRYPT
@@ -753,6 +917,11 @@ class VNCProxy:
             writer.write(self.server_init)
             await writer.drain()
 
+            if self.send_queues:
+                # From here on all FramebufferUpdates go through this task
+                state.writer_task = asyncio.create_task(
+                    self._client_writer(state))
+
             # ---- MAIN CLIENT LOOP ----
             while True:
                 msg_type = ord(await reader.readexactly(1))
@@ -776,11 +945,12 @@ class VNCProxy:
                     incremental, x, y, w, h = struct.unpack(">BHHHH", rest)
 
                     if incremental == 0:
-                        await self.send_full_frame(state)
-                        state.needs_full = False
-                        state.wants_update = True
-                    else:
-                        state.wants_update = True
+                        if self.send_queues:
+                            state.needs_full = True
+                            state.has_data.set()
+                        else:
+                            await self._send_full_frame_direct(state)
+                    state.wants_update = True
 
                 elif msg_type == 4:  # KeyEvent
                     payload = await reader.readexactly(7)
@@ -854,6 +1024,8 @@ class VNCProxy:
                 self.logger.info(
                     f"client {client_id} released control (disconnected)")
             self.clients.pop(client_id, None)
+            if state.writer_task is not None:
+                state.writer_task.cancel()
             writer.close()
 
     # --------------------------------------------------------

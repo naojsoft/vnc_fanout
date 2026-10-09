@@ -29,6 +29,9 @@ Features and Limitations
   connections if the upstream VNC server is shut down (only recovers if
   restarted with the same geometry/depth/encoding though)
 - Supports only simple VNCAuth authentication
+- Clients that stop reading are disconnected after a timeout; optionally
+  (--send-queues) each client gets its own send queue so that a slow
+  client does not slow down the others
 
 Encryption
 ----------
@@ -54,6 +57,14 @@ Usage
 $ vnc_fanout -f examples/example_config.toml
 
 See the example config file for the format and options.
+
+
+Testing
+=======
+$ pytest tests/
+
+The tests run the proxy against a fake upstream VNC server on localhost
+(takes about 30 seconds).
 
 
 Servers Tested With

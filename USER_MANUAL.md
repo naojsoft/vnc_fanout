@@ -33,6 +33,7 @@ vnc_fanout -f my_config.toml
 |---|---|
 | `-f FILE`, `--config FILE` | Path to the TOML configuration file (required) |
 | `--pidfile FILE` | Write the process PID to FILE |
+| `--send-queues` | Use per-client send queues for all screens (see the `send_queues` option) |
 
 ## Configuration File
 
@@ -128,7 +129,8 @@ These configure the proxy server that VNC clients connect to.
 | `proxy_viewonly_password` | string | _(required)_ | Password for view-only downstream connections. Clients authenticating with this password can only watch the screen. |
 | `proxy_control_password` | string | _(none)_ | Password for control-capable downstream connections. Clients authenticating with this password can claim control of the upstream session. See [View-Only and Control Passwords](#view-only-and-control-passwords) below. If not set, all clients are view-only. |
 | `grab_key` | string | `"f1"` | The key to press with Ctrl to grab control. See [Grabbing and Releasing Control](#grabbing-and-releasing-control) for valid keys. |
-| `client_write_timeout` | number | 10 | Seconds to wait for a client to accept a screen update before disconnecting it. A client that stops reading (e.g., a suspended laptop or stalled network) stalls updates to **all** clients for up to this long, so keep it short; but a client on a slow link must be able to receive a full-screen update within this time. |
+| `client_write_timeout` | number | 10 | Seconds to wait for a client to accept a screen update before disconnecting it (e.g., a suspended laptop or stalled network). Without `send_queues`, a client that is slow to read delays updates to **all** clients for up to this long. A client on a slow link must be able to receive a full-screen update within this time. |
+| `send_queues` | boolean | `false` | Give each client its own send queue. A slow or stalled client then delays only itself; if it falls behind it skips intermediate updates and receives a full frame instead. When `false`, updates are written to each client in turn, so the slowest client sets the pace for everyone. Can also be enabled for all screens with `--send-queues`. |
 | `proxy_tls_cert` | string | _(none)_ | Path to a PEM certificate file for downstream TLS (VeNCrypt). When set, clients can connect with VeNCrypt (encrypted) or plain VNC auth (unencrypted). |
 | `proxy_tls_key` | string | _(none)_ | Path to the PEM private key file corresponding to `proxy_tls_cert`. |
 | `proxy_tls_required` | boolean | `false` | When `true`, only VeNCrypt (encrypted) connections are accepted. Clients that do not support VeNCrypt will be unable to connect. Only effective when `proxy_tls_cert` and `proxy_tls_key` are also set. |
