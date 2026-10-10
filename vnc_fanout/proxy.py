@@ -895,7 +895,10 @@ class VNCProxy:
                     resp == vnc_encrypt(challenge,
                                         self.downstream_control_password):
                 can_control = True
-            elif resp != vnc_encrypt(challenge, self.downstream_viewonly_password):
+            elif self.downstream_viewonly_password is None or \
+                    resp != vnc_encrypt(challenge,
+                                        self.downstream_viewonly_password):
+                # no view-only password configured, or it doesn't match
                 writer.write(struct.pack(">I", 1))
                 await writer.drain()
                 return

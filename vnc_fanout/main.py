@@ -87,6 +87,12 @@ def run_proxy(scr_d):
     downstream_viewonly_password = scr_d['downstream'].get('proxy_viewonly_password', None)
     downstream_control_password = scr_d['downstream'].get(
         'proxy_control_password', None)
+    if downstream_viewonly_password is None and \
+            downstream_control_password is None:
+        logger.error(f"{name}: neither 'proxy_viewonly_password' nor "
+                     f"'proxy_control_password' configured in "
+                     f"[{name}.downstream]; not starting")
+        return name
 
     reconnect_delay = scr_d.get('upstream_reconnect_delay', 10)
     grab_key = scr_d['downstream'].get('grab_key', 'f1')

@@ -126,7 +126,7 @@ These configure the proxy server that VNC clients connect to.
 |---|---|---|---|
 | `proxy_host` | string | `"localhost"` | Interface to bind the proxy server on. Use `"0.0.0.0"` to listen on all interfaces. |
 | `proxy_port` | integer | _(required)_ | Port for the proxy server. |
-| `proxy_viewonly_password` | string | _(required)_ | Password for view-only downstream connections. Clients authenticating with this password can only watch the screen. |
+| `proxy_viewonly_password` | string | _(none)_ | Password for view-only downstream connections. Clients authenticating with this password can only watch the screen. If not set, only control clients can connect. At least one of `proxy_viewonly_password` and `proxy_control_password` is required. |
 | `proxy_control_password` | string | _(none)_ | Password for control-capable downstream connections. Clients authenticating with this password can claim control of the upstream session. See [View-Only and Control Passwords](#view-only-and-control-passwords) below. If not set, all clients are view-only. |
 | `grab_key` | string | `"f1"` | The key to press with Ctrl to grab control. See [Grabbing and Releasing Control](#grabbing-and-releasing-control) for valid keys. |
 | `client_write_timeout` | number | 10 | Seconds to wait for a client to accept a screen update before disconnecting it (e.g., a suspended laptop or stalled network). Without `send_queues`, a client that is slow to read delays updates to **all** clients for up to this long. A client on a slow link must be able to receive a full-screen update within this time. |

@@ -18,6 +18,7 @@ import zlib
 
 import pytest
 
+from vnc_fanout.main import run_proxy
 from vnc_fanout.proxy import VNCProxy, vnc_encrypt
 
 W, H = 640, 480
@@ -221,8 +222,11 @@ class LogCapture(logging.Handler):
 class Harness:
     """Fake upstream + VNCProxy + helpers for spawning clients."""
 
-    def __init__(self, send_queues, client_write_timeout=2.0):
+    def __init__(self, send_queues, client_write_timeout=2.0,
+                 viewonly_password=PW, control_password=None):
         self.send_queues = send_queues
+        self.viewonly_password = viewonly_password
+        self.control_password = control_password
         self.client_write_timeout = client_write_timeout
         self.log = LogCapture()
         self.tasks = []
@@ -235,7 +239,8 @@ class Harness:
                                                    "127.0.0.1", 0)
         up_port = self.upstream.sockets[0].getsockname()[1]
         self.proxy = VNCProxy(logger, "127.0.0.1", up_port, "x",
-                              "127.0.0.1", 0, PW,
+                              "127.0.0.1", 0, self.viewonly_password,
+                              downstream_control_password=self.control_password,
                               reconnect_delay=1,
                               client_write_timeout=self.client_write_timeout,
                               send_queues=self.send_queues)
@@ -267,6 +272,21 @@ class Harness:
 
 def run(coro):
     asyncio.run(coro)
+
+
+async def try_auth(port, password):
+    """Authenticate to the proxy; return the SecurityResult (0 = OK)."""
+    r, w = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        await r.readexactly(12)
+        w.write(b"RFB 003.008\n")
+        await r.readexactly(2)
+        w.write(b"\x02")
+        challenge = await r.readexactly(16)
+        w.write(vnc_encrypt(challenge, password))
+        return struct.unpack(">I", await r.readexactly(4))[0]
+    finally:
+        w.close()
 
 
 # ------------------------------------------------------------
@@ -381,3 +401,36 @@ def test_direct_slow_client_throttles_others():
             await asyncio.sleep(3)
             assert fast.rate(t0, t0 + 3) <= 3
     run(go())
+
+
+def test_auth_viewonly_and_control():
+    """Both passwords accepted; anything else rejected."""
+    async def go():
+        async with Harness(False, viewonly_password="view",
+                           control_password="ctrl") as h:
+            assert await try_auth(h.port, "view") == 0
+            assert await try_auth(h.port, "ctrl") == 0
+            assert await try_auth(h.port, "wrong") == 1
+    run(go())
+
+
+def test_auth_control_only():
+    """With only a control password configured, it is accepted and
+    other passwords are rejected (not an exception)."""
+    async def go():
+        async with Harness(False, viewonly_password=None,
+                           control_password="ctrl") as h:
+            assert await try_auth(h.port, "ctrl") == 0
+            assert await try_auth(h.port, "wrong") == 1
+            assert h.log.messages(logging.ERROR) == []
+    run(go())
+
+
+def test_no_downstream_password_does_not_start():
+    """A screen with neither downstream password refuses to start."""
+    cfg = {'name': 'screenT',
+           'upstream': {'vnc_host': '127.0.0.1', 'vnc_port': 1},
+           'downstream': {'proxy_host': '127.0.0.1', 'proxy_port': 0}}
+    t0 = time.monotonic()
+    assert run_proxy(cfg) == 'screenT'
+    assert time.monotonic() - t0 < 1
